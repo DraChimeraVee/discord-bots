@@ -11,8 +11,7 @@
 DraVee's personal bots, kept private, each the MCP server a coding session starts, Python 3.12 with its standard
 library: AogoWimsy, Aogo (a Claude Code session) on Discord, and XujiWimsy, the same server with a bot of its own, for
 Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy, are in
-[scarletnx/wimsy-core](https://github.com/scarletnx/wimsy-core): this repository was split from it on 2026-10-30,
-each file's history kept (git filter-repo).
+[scarletnx/wimsy-core](https://github.com/scarletnx/wimsy-core).
 
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
@@ -24,10 +23,10 @@ No bot keeps a message or logs what was said, and none pings anyone.
 ## AogoWimsy
 
 A local MCP server: Claude Code starts `aogo/aogowimsy.py` and talks to it on stdin and stdout through the
-`initialize` handshake, protocol 2025-11-25 back to 2024-11-05. It does not speak revision 2026-07-28: Claude Code
+`initialize` handshake, protocol `2025-11-25` back to `2024-11-05`. It does not speak revision `2026-07-28`: Claude Code
 registers no [channel](https://code.claude.com/docs/en/channels-reference) on it, as that revision cannot carry channel
 messages ([MCP, Push messages with channels](https://code.claude.com/docs/en/mcp#push-messages-with-channels)), so it
-answers a 2026-07-28 client's `server/discover` with method not found, and the client falls back to `initialize`.
+answers a `2026-07-28` client's `server/discover` with method not found, and the client falls back to `initialize`.
 Discord's REST API v10 reads and posts; once the client says it is initialized, it also stays on Discord's gateway (a
 WebSocket of its own: heartbeats, resume after a drop, a fresh session when Discord ends the old one, backoff up to
 60 s), which wakes the session and feeds `discord_wait`. Its tools, as the session sees them:
