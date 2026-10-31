@@ -1,0 +1,20 @@
+name: Tests
+
+# AogoWimsy's and Xuji's tests, on each pull request and each push to main
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: The bots' tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 xuji/test_xuji.py
+      - run: python3 aogo/test_aogowimsy.py
