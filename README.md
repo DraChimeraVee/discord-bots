@@ -51,7 +51,7 @@ owner's messages, the listed users' and its own reach the session; a stranger's 
 lets it through, the others are counted and nothing else of them given. The owner lets a stranger's message through,
 that one message:
 
-- with his `:wimsytetoutau:` reaction, on a message addressed to AogoWimsy (a mention, or a reply to one of its
+- with his `:wimsyaogo:` reaction, on a message addressed to AogoWimsy (a mention, or a reply to one of its
   messages); only his reaction counts;
 - by replying to it with a message that mentions AogoWimsy, whoever wrote it; a listed user's reply lets nothing
   through.
@@ -77,7 +77,7 @@ body:
 | `kind` | What wakes the session | Its attributes |
 |---|---|---|
 | `message` | a message addressed to AogoWimsy (a mention, or a reply to one of its messages) from the owner or a listed user, in a channel it may read; any DM the owner or a listed user sends it. When the owner replies to someone while mentioning AogoWimsy, the text ends with the message he replied to, whole | `author`, `author_id`, `channel`, `message_id`, `reply_to`, `attachments`; `quoted_author`, `quoted_author_id`, `quoted_attachments` for the owner's reply |
-| `approved` | a stranger's message addressed to AogoWimsy, once the owner puts his `:wimsytetoutau:` reaction on it, once | as `message` |
+| `approved` | a stranger's message addressed to AogoWimsy, once the owner puts his `:wimsyaogo:` reaction on it, once | as `message` |
 | `dm` | someone neither the owner nor listed wrote to AogoWimsy in DMs: their name and id, never what they wrote; once a person while it runs | `author`, `author_id` |
 | `draft` | the owner's check mark or cross on a draft this session made, still waiting: it is posted or refused then, not on a tool's next look (another session's draft waits for that session) | `draft`, `status` (sent, not sent), `channel`; `message_id` once posted |
 | `error`, `notice` | the gateway stopped (a close code Discord takes no new try after: a token that is not the bot's, intents not turned on), cannot be reached for three tries in a row, or is back | |
