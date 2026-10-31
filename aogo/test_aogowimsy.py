@@ -38,7 +38,11 @@ DM, FRIEND_DM, STRANGER_DM = '400000000000000001', '400000000000000002', '400000
 WIMSY = f'{aw.WIMSY}:600000000000000001'  # the owner's custom emoji, as a reaction's path names it
 OTHER_EMOJI = 'wimsyother:600000000000000002'
 YES, NO = aw.YES, aw.NO
-INITIALIZE = {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'test', 'version': '1'}}
+INITIALIZE = {
+    'protocolVersion': '2025-11-25',
+    'capabilities': {},
+    'clientInfo': {'name': 'claude-code', 'version': '1'},
+}
 
 
 class FakeDiscord:
@@ -437,7 +441,7 @@ class WithDiscord(unittest.TestCase):
         self.clock = FakeClock()
         self.settings = aw.Settings(TOKEN, OWNER, frozenset({FRIEND}), frozenset({GENERAL, HELP}))
         self.api = f'http://127.0.0.1:{self.http.server_port}/api/v10'
-        self.bot = aw.AogoWimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        self.bot = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
         self.sent = []
         self.server = self.started_server(self.bot)
         self.logs = []
@@ -568,7 +572,7 @@ class Post(WithDiscord):
 
     def test_a_restart_keeps_the_drafts_images(self):
         draft = self.tool('discord_post', channel=GENERAL, text='later', files=[self.image('a.webp', b'RIFF webp')])
-        fresh = aw.AogoWimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
         self.server = self.started_server(fresh)
         self.fake.react(draft['draft'], YES, OWNER)
         self.assertEqual(self.tool('discord_post_status', draft=draft['draft'])['status'], 'sent')
@@ -602,7 +606,7 @@ class Post(WithDiscord):
 
     def test_a_restart_loses_no_draft_the_draft_is_the_state(self):
         draft = self.tool('discord_post', channel=GENERAL, text='after a restart', wait=0)['draft']
-        fresh = aw.AogoWimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
         self.server = self.started_server(fresh)
         self.fake.react(draft, YES, OWNER)
         self.assertEqual(self.tool('discord_post_status', draft=draft)['status'], 'sent')
@@ -981,10 +985,10 @@ class Attachments(WithDiscord):
 class SavesFolder(unittest.TestCase):
     def test_xdg_cache_home_when_absolute_else_the_home_cache(self):
         home = Path.home() / '.cache' / 'aogowimsy'
-        self.assertEqual(aw.saves_folder({'XDG_CACHE_HOME': '/var/tmp/c'}), Path('/var/tmp/c/aogowimsy'))
-        self.assertEqual(aw.saves_folder({'XDG_CACHE_HOME': 'relative/c'}), home)
-        self.assertEqual(aw.saves_folder({'XDG_CACHE_HOME': ''}), home)
-        self.assertEqual(aw.saves_folder({}), home)
+        self.assertEqual(aw.saves_folder('aogowimsy', {'XDG_CACHE_HOME': '/var/tmp/c'}), Path('/var/tmp/c/aogowimsy'))
+        self.assertEqual(aw.saves_folder('aogowimsy', {'XDG_CACHE_HOME': 'relative/c'}), home)
+        self.assertEqual(aw.saves_folder('aogowimsy', {'XDG_CACHE_HOME': ''}), home)
+        self.assertEqual(aw.saves_folder('aogowimsy', {}), home)
 
     def test_a_long_name_keeps_its_suffix_within_200_bytes(self):
         name = aw.file_name('é' * 300 + '.png', 'fallback')
@@ -1118,7 +1122,7 @@ class Protocol(WithDiscord):
         self.assertEqual(error['code'], -32602)
         self.assertIn('tools/list came before initialize; AogoWimsy speaks 2025-11-25', error['message'])
         self.assertEqual(self.ask('ping', server=server), {'jsonrpc': '2.0', 'id': 1, 'result': {}})
-        self.assertEqual(self.ask('tools/list')['result'], {'tools': aw.TOOLS})
+        self.assertEqual(self.ask('tools/list')['result'], {'tools': aw.tool_list(aw.AOGO)})
 
     def test_it_starts_hearing_discord_once_the_client_is_initialized_and_only_then(self):
         calls = []
@@ -1244,7 +1248,7 @@ class Channels(WithDiscord):
         self.assertEqual(len(self.pushes), 2)
 
     def test_a_draft_another_session_made_waits_for_that_sessions_look(self):
-        other = aw.AogoWimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        other = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
         self.server = self.started_server(other)
         draft = self.tool('discord_post', channel=GENERAL, text='from another session', wait=0)['draft']
         self.reacted(DM, draft, YES, OWNER)  # this session's ear: not its draft
@@ -1808,7 +1812,7 @@ class Stdio(unittest.TestCase):
         self.assertEqual(answer['result']['capabilities'], {'tools': {}, 'experimental': {'claude/channel': {}}})
         self.assertIn(f'channels {GENERAL}, {HELP} and their threads', answer['result']['instructions'])
         answer = self.exchange(proc, {'jsonrpc': '2.0', 'id': 'list', 'method': 'tools/list'})
-        self.assertEqual(answer, {'jsonrpc': '2.0', 'id': 'list', 'result': {'tools': aw.TOOLS}})
+        self.assertEqual(answer, {'jsonrpc': '2.0', 'id': 'list', 'result': {'tools': aw.tool_list(aw.AOGO)}})
         self.assertEqual(self.exchange(proc, {'jsonrpc': '2.0', 'id': 3, 'method': 'ping'})['result'], {})
         answer = self.exchange(proc, b'{"jsonrpc": "2.0", "id": 4, "method": ')
         self.assertEqual(answer['error']['code'], -32700)

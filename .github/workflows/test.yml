@@ -1,6 +1,6 @@
 name: Tests
 
-# AogoWimsy's and Xuji's tests, on each pull request and each push to main
+# AogoWimsy's and XujiWimsy's tests, on each pull request and each push to main
 on:
   push:
     branches: [main]
@@ -16,5 +16,5 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - run: python3 xuji/test_xuji.py
+      - run: python3 xuji/test_xujiwimsy.py
       - run: python3 aogo/test_aogowimsy.py
