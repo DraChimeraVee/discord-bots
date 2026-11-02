@@ -39,6 +39,9 @@ WIMSY = f'{aw.WIMSY}:600000000000000001'  # the owner's custom emoji, as a react
 OTHER_EMOJI = 'wimsyother:600000000000000002'
 YES, NO, EYES, THUMBS = aw.YES, aw.NO, aw.EYES, aw.THUMBS
 OWNERS = f':{aw.WIMSY}:'  # the owner's custom emoji, as discord_react takes it
+DRAWN_IDS = {name: f'6000000000000001{n:02d}' for n, name in enumerate(aw.DRAWN)}  # once uploaded to the server
+CUSTOM = ':wimsyaogo_eyes:, :wimsyaogo_done:, :wimsyaogo_thumbsup:, :wimsyaogo_no:'
+PNG_EMOJI = b'\x89PNG\r\n\x1a\n an emoji'
 INITIALIZE = {
     'protocolVersion': '2025-11-25',
     'capabilities': {},
@@ -54,6 +57,7 @@ class FakeDiscord:
         ('GET', r'/users/@me/guilds', 'guilds'),
         ('GET', r'/guilds/(\d+)/roles', 'guild_roles'),
         ('GET', r'/guilds/(\d+)/emojis', 'guild_emojis'),
+        ('POST', r'/guilds/(\d+)/emojis', 'create_emoji'),
         ('POST', r'/users/@me/channels', 'open_dm'),
         ('GET', r'/gateway/bot', 'gateway'),
         ('GET', r'/channels/(\d+)', 'channel'),
@@ -204,6 +208,20 @@ class FakeDiscord:
         if guild not in self.guild_ids:
             return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
         return 200, self.server_emojis.get(guild, []), {}
+
+    def create_emoji(self, query, body, guild):
+        if guild not in self.guild_ids:
+            return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
+        if set(body) != {'name', 'image'} or not body['image'].startswith('data:image/png;base64,'):
+            return 400, {'code': 50035, 'message': 'Invalid Form Body', 'errors': {}}, {}
+        made = {'id': DRAWN_IDS.get(body['name'], '600000000000000999'), 'name': body['name'], 'available': True}
+        self.server_emojis.setdefault(guild, []).append(made)
+        return 201, made, {}
+
+    def upload(self, *names, guild=GUILD):
+        """the server's emojis of these names, as if the owner uploaded them"""
+        for name in names:
+            self.server_emojis.setdefault(guild, []).append({'id': DRAWN_IDS[name], 'name': name})
 
     def open_dm(self, query, body):
         if body != {'recipient_id': OWNER}:
@@ -1038,12 +1056,13 @@ class React(WithDiscord):
 
     def test_any_other_emoji_is_refused_naming_it_its_code_points_and_the_ones_taken(self):
         asked = self.fake.say(GENERAL, OWNER, 'hello')
-        taken = f'not one AogoWimsy reacts with: it takes {EYES}, {YES}, {THUMBS}, {NO}, :wimsyaogo:'
+        taken = f'not one AogoWimsy reacts with: it takes {CUSTOM}, {EYES}, {YES}, {THUMBS}, {NO}, :wimsyaogo:'
         party, selector = chr(0x1F389), chr(0xFE0F)
         cases = (
             (party, f'emoji is "{party}" (U+1F389), {taken}'),
             (THUMBS + selector, f'emoji is "{THUMBS}{selector}" (U+1F44D U+FE0F), {taken}'),
             ('wimsyaogo', f'emoji is "wimsyaogo", {taken}'),
+            ('wimsyaogo_eyes', f'emoji is "wimsyaogo_eyes", {taken}'),
             (':wimsytetoutau:', f'emoji is ":wimsytetoutau:", {taken}'),
             (WIMSY, f'emoji is "{WIMSY}", {taken}'),
             ('', f'emoji is "", {taken}'),
@@ -1155,7 +1174,8 @@ class React(WithDiscord):
                 self.tool('discord_react', channel=channel, message=number, emoji=OWNERS)['status'], 'reacted'
             )
             self.assertEqual(self.fake.reactions[number], {made: [BOT]})
-        self.assertEqual((self.emojis_asked(GUILD), self.emojis_asked(OTHER_GUILD)), (1, 1))
+        # the channel's server asked again for what it lacked: an emoji may have been uploaded since
+        self.assertEqual((self.emojis_asked(GUILD), self.emojis_asked(OTHER_GUILD)), (2, 1))
 
     def test_wimsyaogo_no_server_has_is_refused_naming_the_servers_looked_in(self):
         self.fake.guild_ids.append(OTHER_GUILD)
@@ -1164,8 +1184,7 @@ class React(WithDiscord):
         said = self.error('discord_react', channel=HELP, message=asked, emoji=OWNERS)
         self.assertEqual(
             said,
-            f'no server AogoWimsy is in has an emoji named wimsyaogo (it looked in {GUILD}, {OTHER_GUILD}), so '
-            ':wimsyaogo: cannot be put',
+            f'no server AogoWimsy is in has an emoji named wimsyaogo (it looked in {GUILD}, {OTHER_GUILD})',
         )
         self.assertEqual(self.fake.reactions, {})
 
@@ -1224,18 +1243,246 @@ class React(WithDiscord):
     def test_the_tools_and_the_instructions_say_which_reactions_and_when(self):
         tools = {tool['name']: tool for tool in aw.tool_list(aw.AOGO)}
         self.assertEqual(list(tools), list(aw.TOOL_NAMES))
+        quick = [
+            ':wimsyaogo_eyes:',
+            ':wimsyaogo_done:',
+            ':wimsyaogo_thumbsup:',
+            ':wimsyaogo_no:',
+            EYES,
+            YES,
+            THUMBS,
+            NO,
+        ]
         for name in ('discord_react', 'discord_unreact'):
             emoji = tools[name]['inputSchema']['properties']['emoji']
-            self.assertEqual(emoji['enum'], [EYES, YES, THUMBS, NO, ':wimsyaogo:'])
+            self.assertEqual(emoji['enum'], [*quick, ':wimsyaogo:'])
             self.assertEqual(tools[name]['inputSchema']['required'], ['channel', 'message', 'emoji'])
+        self.assertEqual(tools['discord_quick']['inputSchema']['properties']['emoji']['enum'], quick)
+        self.assertEqual(tools['discord_quick']['inputSchema']['required'], ['channel', 'reply_to', 'emoji'])
+        names = tools['discord_emoji_upload']['inputSchema']['properties']['name']['enum']
+        self.assertEqual(names, ['wimsyaogo_eyes', 'wimsyaogo_done', 'wimsyaogo_thumbsup', 'wimsyaogo_no'])
         meanings = (
-            f"{EYES} (seen, on it), {YES} (done), {THUMBS} (agreed), {NO} (cannot), :wimsyaogo: (the owner's emoji)"
+            f':wimsyaogo_eyes: or {EYES} (seen, on it); :wimsyaogo_done: or {YES} (done); :wimsyaogo_thumbsup: or '
+            f'{THUMBS} (agreed); :wimsyaogo_no: or {NO} (cannot)'
         )
-        self.assertIn(meanings, tools['discord_react']['description'])
+        for name in ('discord_react', 'discord_quick'):
+            self.assertIn(meanings, tools[name]['description'])
         said = aw.instructions(self.settings)
-        self.assertIn(f'react to it with discord_react instead of posting: {meanings}', said)
-        self.assertIn(f'put {EYES} when you start on a message and, once done, take it off with discord_unreact', said)
+        self.assertIn(
+            "react to it with discord_react instead of posting, the server's emoji first, its unicode one only while "
+            f"that is not uploaded: {meanings}; and :wimsyaogo:, the owner's emoji",
+            said,
+        )
+        self.assertIn(
+            'put :wimsyaogo_eyes: when you start on a message and, once done, take it off with discord_unreact and '
+            'put :wimsyaogo_done:',
+            said,
+        )
         self.assertIn("AogoWimsy's own :wimsyaogo: lets nothing through: only the owner's does", said)
+        self.assertIn('a quick reply, use discord_quick: it posts at once, with no draft, and takes no text', said)
+
+
+class Drawn(WithDiscord):
+    """the server's custom emojis drawn for the bot's answers: found by name, a missing one named with its unicode"""
+
+    def test_each_drawn_emoji_goes_by_the_servers_one_of_its_name_and_comes_off(self):
+        self.fake.upload(*aw.DRAWN)
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        for name in aw.DRAWN:
+            with self.subTest(name=name):
+                got = self.tool('discord_react', channel=GENERAL, message=asked, emoji=f':{name}:')
+                self.assertEqual(got['status'], 'reacted')
+                self.assertEqual(self.fake.reactions[asked][f'{name}:{DRAWN_IDS[name]}'], [BOT])
+        self.assertEqual(len(self.fake.posts('GET', f'/guilds/{GUILD}/emojis')), 1)  # hits from the first answer
+        gone = self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(gone['status'], 'removed')
+        self.assertNotIn(f'wimsyaogo_eyes:{DRAWN_IDS["wimsyaogo_eyes"]}', self.fake.reactions[asked])
+        said = f'discord_react: reacted, :wimsyaogo_done: of AogoWimsy on message {asked} in channel {GENERAL}'
+        self.assertIn(said, self.logs)
+
+    def test_one_not_uploaded_yet_is_refused_naming_it_and_its_unicode_and_found_once_it_is(self):
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(
+            said,
+            f'no server AogoWimsy is in has an emoji named wimsyaogo_eyes (it looked in {GUILD}): it is not uploaded '
+            f'yet (discord_emoji_upload uploads it); {EYES} says the same',
+        )
+        self.assertEqual(self.fake.reactions, {})
+        self.fake.upload('wimsyaogo_eyes')  # no gateway event: the miss is asked again
+        self.assertEqual(
+            self.tool('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')['status'], 'reacted'
+        )
+        self.assertEqual(self.fake.reactions[asked], {f'wimsyaogo_eyes:{DRAWN_IDS["wimsyaogo_eyes"]}': [BOT]})
+
+
+class Quick(WithDiscord):
+    """discord_quick: a reply of one emoji alone, posted at once; a text never"""
+
+    def test_one_emoji_alone_posts_at_once_replying_pinging_no_one_with_no_draft(self):
+        self.fake.upload(*aw.DRAWN)
+        asked = self.fake.say(GENERAL, OWNER, 'is it merged?')
+        got = self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_done:')
+        posted = self.fake.last(GENERAL)
+        link = f'https://discord.com/channels/{GUILD}/{GENERAL}/{posted["id"]}'
+        want = {'status': 'posted', 'link': link, 'message': posted['id'], 'channel': GENERAL, 'reply_to': asked}
+        self.assertEqual(got, dict(want, emoji=':wimsyaogo_done:'))
+        self.assertEqual(posted['content'], f'<:wimsyaogo_done:{DRAWN_IDS["wimsyaogo_done"]}>')
+        body = self.fake.posts('POST', f'/channels/{GENERAL}/messages')[0][3]
+        self.assertEqual(body['allowed_mentions'], {'parse': [], 'replied_user': False})
+        reference = {'message_id': asked, 'channel_id': GENERAL, 'fail_if_not_exists': True}
+        self.assertEqual(body['message_reference'], reference)
+        self.assertEqual((self.fake.messages[DM], self.clock.waits), ([], []))  # no draft, no wait
+        said = f'discord_quick: posted, :wimsyaogo_done: of AogoWimsy as message {posted["id"]} replying to {asked} '
+        self.assertEqual(self.logs, [said + f'in channel {GENERAL}', 'discord_quick: posted'])
+        plain = self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=THUMBS)
+        self.assertEqual((plain['status'], self.fake.last(GENERAL)['content']), ('posted', THUMBS))
+        self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(len(self.fake.posts('GET', f'/guilds/{GUILD}/emojis')), 2)  # asked at each custom one
+
+    def test_a_text_or_any_other_emoji_is_refused_and_nothing_is_posted(self):
+        asked = self.fake.say(GENERAL, OWNER, 'is it merged?')
+        taken = (
+            "not one AogoWimsy posts alone; a text goes through discord_post and the owner's "
+            f'{YES}: it takes {CUSTOM}, {EYES}, {YES}, {THUMBS}, {NO}'
+        )
+        for emoji, said in (
+            ('done, merged', f'emoji is "done, merged", {taken}'),
+            (
+                f'{YES} merged',
+                f'emoji is "{YES} merged" (U+2705 U+0020 U+006D U+0065 U+0072 U+0067 U+0065 U+0064), {taken}',
+            ),
+            (OWNERS, f'emoji is ":wimsyaogo:", {taken}'),
+            (f'{EYES}{EYES}', f'emoji is "{EYES}{EYES}" (U+1F440 U+1F440), {taken}'),
+        ):
+            with self.subTest(emoji=emoji):
+                self.assertEqual(self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=emoji), said)
+        said = self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=YES, text='merged')
+        self.assertEqual(said, 'discord_quick has no argument "text"; it takes channel, reply_to, emoji')
+        self.assertEqual(self.error('discord_quick', channel=GENERAL, emoji=YES), 'discord_quick needs reply_to')
+        self.assertEqual(self.fake.requests, [])
+        self.assertEqual(len(self.fake.messages[GENERAL]), 1)
+
+    def test_a_channel_it_may_not_post_in_a_strangers_message_a_draft_and_a_missing_emoji_post_nothing(self):
+        elsewhere = self.fake.say(OTHER, OWNER, 'elsewhere')
+        said = self.error('discord_quick', channel=OTHER, reply_to=elsewhere, emoji=YES)
+        self.assertIn(f'channel {OTHER} is not one AogoWimsy may post in: AOGOWIMSY_CHANNELS lists', said)
+        theirs = self.fake.say(GENERAL, STRANGER, 'a secret of the stranger', mentions=[BOT])
+        said = self.error('discord_quick', channel=GENERAL, reply_to=theirs, emoji=YES)
+        self.assertIn(f'message {theirs} is not one AogoWimsy gives', said)
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        said = self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_no:')
+        self.assertIn(f'emoji named wimsyaogo_no (it looked in {GUILD}): it is not uploaded yet', said)
+        self.assertIn(f'{NO} says the same', said)
+        in_dm = self.fake.say(DM, OWNER, 'in the DMs')  # read there, but posted in only as discord_post does
+        said = self.error('discord_quick', channel=DM, reply_to=in_dm, emoji=YES)
+        self.assertIn(f'channel {DM} is not one AogoWimsy may post in', said)
+        draft = self.tool('discord_post', channel=GENERAL, text='hello', wait=0)['draft']
+        self.bot.settings = self.settings._replace(channels=None)  # the owner's DMs are a channel to post in now
+        said = self.error('discord_quick', channel=DM, reply_to=draft, emoji=YES)
+        self.assertIn(f"message {draft} is a draft of AogoWimsy's", said)
+        self.assertEqual([len(self.fake.messages[c]) for c in (OTHER, GENERAL, DM)], [1, 2, 2])
+
+
+class EmojiUpload(WithDiscord):
+    """discord_emoji_upload: one of the four drawn emojis, from its fixed file, by its name"""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory(prefix='aogowimsy-emoji-')
+        self.addCleanup(folder.cleanup)
+        self.bot.drawings = Path(folder.name)
+        for name in aw.DRAWN:
+            (self.bot.drawings / f'{name}.png').write_bytes(PNG_EMOJI + name.encode())
+
+    def call(self, **args):
+        """discord_emoji_upload's result: its argument name is one tool() and error() take for the tool's"""
+        params = {'name': 'discord_emoji_upload', 'arguments': args}
+        return self.server.handle({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': params})['result']
+
+    def uploads(self, **args):
+        result = self.call(**args)
+        self.assertFalse(result['isError'], result['content'][0]['text'])
+        return json.loads(result['content'][0]['text'])
+
+    def refused(self, **args):
+        result = self.call(**args)
+        self.assertTrue(result['isError'], result['content'][0]['text'])
+        return result['content'][0]['text']
+
+    def test_it_uploads_the_png_as_a_data_uri_by_its_name_and_reacts_with_it_at_once(self):
+        got = self.uploads(guild=GUILD, name='wimsyaogo_eyes')
+        eyes = DRAWN_IDS['wimsyaogo_eyes']
+        self.assertEqual(got, {'status': 'uploaded', 'guild': GUILD, 'name': 'wimsyaogo_eyes', 'id': eyes})
+        body = self.fake.posts('POST', f'/guilds/{GUILD}/emojis')[0][3]
+        image = 'data:image/png;base64,' + base64.b64encode(PNG_EMOJI + b'wimsyaogo_eyes').decode()
+        self.assertEqual(body, {'name': 'wimsyaogo_eyes', 'image': image})
+        self.assertEqual(
+            self.logs[0],
+            f'discord_emoji_upload: uploaded, wimsyaogo_eyes of AogoWimsy as emoji {eyes} in server {GUILD}',
+        )
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        self.tool('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(self.fake.reactions[asked], {f'wimsyaogo_eyes:{eyes}': [BOT]})
+        self.assertEqual(len(self.fake.posts('GET', f'/guilds/{GUILD}/emojis')), 1)  # the upload's own answer
+
+    def test_one_already_there_is_not_uploaded_again(self):
+        self.fake.upload('wimsyaogo_done')
+        got = self.uploads(guild=GUILD, name='wimsyaogo_done')
+        self.assertEqual(
+            got,
+            {'status': 'already there', 'guild': GUILD, 'name': 'wimsyaogo_done', 'id': DRAWN_IDS['wimsyaogo_done']},
+        )
+        self.assertFalse(self.fake.posts('POST', f'/guilds/{GUILD}/emojis'))
+        (self.bot.drawings / 'wimsyaogo_done.png').unlink()  # the file is not needed for one already there
+        self.assertEqual(self.uploads(guild=GUILD, name='wimsyaogo_done')['status'], 'already there')
+
+    def test_without_create_expressions_the_error_names_it_and_the_invite_with_it(self):
+        self.fake.fail[('POST', f'/guilds/{GUILD}/emojis')] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        said = self.refused(guild=GUILD, name='wimsyaogo_no')
+        self.assertEqual(274877975616 + (1 << 43), 9070970997824)
+        self.assertEqual(
+            said,
+            f'Discord answered 403 to POST /guilds/{GUILD}/emojis: Missing Permissions (code 50013): AogoWimsy needs '
+            f'Create Expressions (8796093022208) in server {GUILD}; give its role that permission (Server Settings, '
+            'Roles), or invite it again with permissions=9070970997824',
+        )
+        self.fake.fail[('POST', f'/guilds/{GUILD}/emojis')] = (403, {'message': 'Missing Access', 'code': 50001})
+        said = self.refused(guild=GUILD, name='wimsyaogo_no')
+        self.assertEqual(said, f'Discord answered 403 to POST /guilds/{GUILD}/emojis: Missing Access (code 50001)')
+
+    def test_only_the_four_names_each_from_its_own_png_and_no_path(self):
+        for name in ('wimsyaogo', 'wimsyaogo_eyes.png', '../wimsyaogo_eyes', '/etc/passwd', ':wimsyaogo_eyes:', 5):
+            with self.subTest(name=name):
+                said = self.refused(guild=GUILD, name=name)
+                self.assertEqual(
+                    said,
+                    f'name is {aw.shown(name)}, not one AogoWimsy uploads: it takes wimsyaogo_eyes, wimsyaogo_done, '
+                    f'wimsyaogo_thumbsup, wimsyaogo_no, each from {self.bot.drawings}/<name>.png',
+                )
+        said = self.refused(guild=GUILD, name='wimsyaogo_eyes', path='/tmp/x.png')
+        self.assertEqual(said, 'discord_emoji_upload has no argument "path"; it takes guild, name')
+        self.assertEqual(self.fake.requests, [])
+        folder = self.bot.drawings
+        (folder / 'wimsyaogo_eyes.png').unlink()
+        (folder / 'wimsyaogo_done.png').write_bytes(b'GIF89a not a png')
+        (folder / 'wimsyaogo_no.png').write_bytes(PNG_EMOJI + b'x' * aw.MOST_EMOJI)
+        said = self.refused(guild=GUILD, name='wimsyaogo_eyes')
+        self.assertIn(f'{folder}/wimsyaogo_eyes.png cannot be read (No such file or directory)', said)
+        said = self.refused(guild=GUILD, name='wimsyaogo_done')
+        self.assertEqual(said, f'{folder}/wimsyaogo_done.png is not a PNG: wimsyaogo_done is uploaded from a PNG')
+        said = self.refused(guild=GUILD, name='wimsyaogo_no')
+        size = len(PNG_EMOJI) + aw.MOST_EMOJI
+        self.assertEqual(said, f'{folder}/wimsyaogo_no.png has {size} bytes: an emoji takes 262144 at most')
+        self.assertFalse(self.fake.posts('POST', f'/guilds/{GUILD}/emojis'))
+        said = self.refused(guild='200000000000000099', name='wimsyaogo_thumbsup')
+        self.assertEqual(
+            said, 'Discord answered 404 to GET /guilds/200000000000000099/emojis: Unknown Guild (code 10004)'
+        )
+
+    def test_its_folder_is_the_owners_wimsy_dist_clone(self):
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        self.assertEqual(fresh.drawings, Path.home() / 'WorkDir/ScarletNX/wimsy-dist/emoji')
 
 
 class SavesFolder(unittest.TestCase):

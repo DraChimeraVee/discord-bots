@@ -15,8 +15,8 @@ Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy
 
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
-| `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through seven MCP tools: post (only once its owner approves the draft), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, and put or take off one of five reactions, at once (a reaction carries no text). A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, the listed users' and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message | to Discord, the drafts (to its owner's DMs), the posts approved and its reactions; to the session, the messages it may read and the ones addressed to it |
-| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and seven tools, with Xuji's bot and settings. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed: the session gets what a tool returns |
+| `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through nine MCP tools: post (only once its owner approves the draft), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), and upload the server's custom emojis it answers with. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, the listed users' and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message | to Discord, the drafts (to its owner's DMs), the posts approved, its reactions and quick replies, the four emojis it uploads; to the session, the messages it may read and the ones addressed to it |
+| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and nine tools, with Xuji's bot and settings. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed: the session gets what a tool returns |
 
 No bot keeps a message or logs what was said, and none pings anyone.
 
@@ -38,15 +38,18 @@ WebSocket of its own: heartbeats, resume after a drop, a fresh session when Disc
 | `discord_read(channel, after, limit=50, from)` | the first `limit` messages after an id, or the newest `limit` without one, oldest first: id, author, time, text, the message it answers, attachments by name, and whether it is a stranger's its owner let through |
 | `discord_wait(channel, after, wait=600, from)` | the first message after an id from the owner or a listed user, as the gateway brings it; what came before it began listening, from REST |
 | `discord_attachments(channel, message)` | saves the attachments of a message `discord_read` gives (the owner's, a listed user's, its own, or a stranger's its owner let through) to `<XDG_CACHE_HOME or ~/.cache>/aogowimsy/<channel>/<message>/`, fetched from Discord's CDN without the token, for the session to open (an image, a log): each one's name, type, size, an image's width and height, and its path, or why it was not saved (over 64 MiB, the CDN's error). A file saved before is not fetched again |
-| `discord_react(channel, message, emoji)` | puts AogoWimsy's reaction on a message `discord_read` gives (never a draft), at once, with no draft and no check mark, so it takes only five: eyes (seen, on it), the check mark (done), thumbs up (agreed), the cross (cannot) and `:wimsyaogo:` (the owner's emoji, by its id: the one a reaction on the message has, else the channel's server's emoji of that name, else another server's the bot is in; its own lets nothing through). Any other is an error naming it, its code points and the five. It answers `reacted`, or `already there` without asking Discord again, and stderr says whose reaction, on which message and channel, and which |
+| `discord_react(channel, message, emoji)` | puts AogoWimsy's reaction on a message `discord_read` gives (never a draft), at once, with no draft and no check mark, so it takes only these: the server's custom emojis `:wimsyaogo_eyes:` (seen, on it), `:wimsyaogo_done:` (done), `:wimsyaogo_thumbsup:` (agreed), `:wimsyaogo_no:` (cannot), the unicode eyes, check mark, thumbs up and cross that say the same, and `:wimsyaogo:` (the owner's emoji; its own lets nothing through). A custom one goes by its id: the one a reaction on the message has, else the channel's server's emoji of that name, else another server's the bot is in, asked again when one was missing (it may have been uploaded since); none is an error naming it and the unicode one that says the same. Any other is an error naming it, its code points and the ones taken. It answers `reacted`, or `already there` without asking Discord again, and stderr says whose reaction, on which message and channel, and which |
 | `discord_unreact(channel, message, emoji)` | takes one of those reactions of AogoWimsy's off a message, the others' staying: `removed`, or `not there` |
+| `discord_quick(channel, reply_to, emoji)` | a quick reply: one of those emojis alone (not `:wimsyaogo:`), posted at once with no draft, as a reply to a message `discord_read` gives (never a draft), pinging no one, where `discord_post` posts. A text, or any other emoji, is an error: a text goes through `discord_post` and the check mark. A custom one's id is asked at each reply, as a stale one would post its name as text. stderr says whose, which, the message posted and the one it answers |
+| `discord_emoji_upload(guild, name)` | uploads to a server one of the four custom emojis above, `name` one of `wimsyaogo_eyes`, `wimsyaogo_done`, `wimsyaogo_thumbsup`, `wimsyaogo_no`, from its fixed file `~/WorkDir/ScarletNX/wimsy-dist/emoji/<name>.png` (a PNG of 256 KiB at most), named as it; no other name or file. One the server has by that name is `already there` and not uploaded again. It needs Create Expressions in that server: without it, the error names it and the invite's permissions with it |
 
 `from` (a list of ids, each the owner or a listed user; anyone else is an error naming the id) narrows read and wait to
 those authors: the others join the count of the left out, and wait returns only on one of theirs.
 
-Its owner's check mark is the only way a text gets out, and no setting turns it off. A reaction carries no text, so
-`discord_react` goes at once, and only one of its five: the server's instructions tell the session to react to say it
-saw a message or finished it (eyes when it starts, the check mark in their place when done) rather than post. It reads and posts in the listed
+Its owner's check mark is the only way a text gets out, and no setting turns it off. A reaction or a reply of one
+emoji alone carries no text, so `discord_react` and `discord_quick` go at once, and only with the emojis above: the
+server's instructions tell the session to react to say it saw a message or finished it (`:wimsyaogo_eyes:` when it
+starts, `:wimsyaogo_done:` in its place when done), the server's emoji before its unicode one, rather than post. It reads and posts in the listed
 channels and their threads, or, with none listed, in every channel and thread Discord lets the bot see (a channel it
 cannot see is Discord's 403 or 404, naming it); it reads its owner's DMs with it too. Of what it reads, only the
 owner's messages, the listed users' and its own reach the session; a stranger's message reaches it once the owner
@@ -126,7 +129,7 @@ after its application (below):
 
 Xuji, the Grok Build session, on Discord as a bot user of its own. `xuji/xujiwimsy.py` runs `aogo/aogowimsy.py` with
 Xuji's identity (the table `IDENTITIES` there): its bot, its env file and keys, its name in every text. Everything
-else is AogoWimsy's, a fix to one a fix to both: the seven tools above, with the same arguments, defaults and answers;
+else is AogoWimsy's, a fix to one a fix to both: the nine tools above, with the same arguments, defaults and answers;
 the owner's check mark as the only way out; the owner, the listed users and the strangers he lets through; nothing
 stored, and stderr never saying what was said.
 
@@ -194,7 +197,9 @@ In Grok Build 1.0.60, neither `[compat.claude] mcps = false` (it covers `~/.clau
 No network and no Discord: AogoWimsy's env file, its MCP answers (and the
 program itself on stdin and stdout), its tools against a fake Discord on 127.0.0.1 (drafts approved, refused, still
 waiting, another person's reaction, the channels and the people it may, `from`, Discord's 429s and errors; its
-reactions: the five, any other refused, the channels and messages it may, no draft, `:wimsyaogo:` by its id), what the
+reactions and quick replies: the emojis taken, any other or a text refused, the channels and messages it may, no
+draft, a custom emoji by its id and one not uploaded yet named; the upload: the fixed file as a data URI, one already
+there, the missing permission named), what the
 gateway's events push to the session (who and what wakes it, the owner's reaction and reply letting a stranger
 through), and its gateway client against a fake gateway on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the
 close codes that stop it, pings, messages in frames), and that lines from several threads never mix on stdout; XujiWimsy's env file and keys (the other bot's refused), its server,
@@ -216,8 +221,8 @@ One application each, in the Developer Portal:
 3. Invite (OAuth2, scope `bot`), with only what it needs:
    - AogoWimsy and XujiWimsy: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add
      Reactions (`discord_react`; the drafts, their card and their reactions are in DMs, which need none):
-     `permissions=274877975616`. A `:wimsyaogo:` of another server than the message's also needs Use External
-     Emojis.
+     `permissions=274877975616`. A custom emoji of another server than the message's also needs Use External
+     Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070970997824` with it.
 
    `https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=<number>`
 
