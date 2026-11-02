@@ -31,13 +31,14 @@ os.environ['no_proxy'] = os.environ['NO_PROXY'] = '127.0.0.1'  # the fakes, neve
 TOKEN = 'MTAwMDAw.fake-token_for.tests'
 PNG = b'\x89PNG\r\n\x1a\n a fake image'
 BOT, OWNER, FRIEND, STRANGER, OTHER_PERSON = (f'10000000000000000{n:02d}' for n in (1, 2, 3, 4, 5))
-GUILD = '200000000000000001'
+GUILD, OTHER_GUILD = '200000000000000001', '200000000000000002'
 BOT_ROLE, OTHER_BOT_ROLE, HELPERS_ROLE = (f'70000000000000000{n:02d}' for n in (1, 2, 3))
 GENERAL, HELP, OTHER, THREAD, OTHER_THREAD, NEW_THREAD = (f'3000000000000000{n:02d}' for n in (1, 2, 3, 11, 12, 13))
 DM, FRIEND_DM, STRANGER_DM = '400000000000000001', '400000000000000002', '400000000000000003'
 WIMSY = f'{aw.WIMSY}:600000000000000001'  # the owner's custom emoji, as a reaction's path names it
 OTHER_EMOJI = 'wimsyother:600000000000000002'
-YES, NO = aw.YES, aw.NO
+YES, NO, EYES, THUMBS = aw.YES, aw.NO, aw.EYES, aw.THUMBS
+OWNERS = f':{aw.WIMSY}:'  # the owner's custom emoji, as discord_react takes it
 INITIALIZE = {
     'protocolVersion': '2025-11-25',
     'capabilities': {},
@@ -52,6 +53,7 @@ class FakeDiscord:
         ('GET', r'/users/@me', 'me'),
         ('GET', r'/users/@me/guilds', 'guilds'),
         ('GET', r'/guilds/(\d+)/roles', 'guild_roles'),
+        ('GET', r'/guilds/(\d+)/emojis', 'guild_emojis'),
         ('POST', r'/users/@me/channels', 'open_dm'),
         ('GET', r'/gateway/bot', 'gateway'),
         ('GET', r'/channels/(\d+)', 'channel'),
@@ -60,6 +62,7 @@ class FakeDiscord:
         ('GET', r'/channels/(\d+)/messages/(\d+)', 'message'),
         ('PATCH', r'/channels/(\d+)/messages/(\d+)', 'edit'),
         ('PUT', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)/@me', 'react_me'),
+        ('DELETE', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)/@me', 'unreact_me'),
         ('GET', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)', 'reactors'),
     )
 
@@ -90,6 +93,13 @@ class FakeDiscord:
             {'id': OTHER_BOT_ROLE, 'name': 'ReiWimsy', 'managed': True, 'tags': {'bot_id': OTHER_PERSON}},
             {'id': HELPERS_ROLE, 'name': 'helpers', 'managed': False},
         ]
+        self.guild_ids = [GUILD]  # the servers the bot is in
+        self.server_emojis = {  # each server's custom emojis
+            GUILD: [
+                {'id': WIMSY.split(':')[1], 'name': aw.WIMSY},
+                {'id': OTHER_EMOJI.split(':')[1], 'name': 'wimsyother'},
+            ]
+        }
         self.messages = {channel: [] for channel in self.channels}  # oldest first
         self.reactions = {}  # a message id: {emoji: [user ids]}
         self.requests = []  # (method, path, query, body)
@@ -183,12 +193,17 @@ class FakeDiscord:
         return 200, self.users[BOT], {}
 
     def guilds(self, query, body):
-        return 200, [{'id': GUILD, 'name': 'ScarletNX'}], {}
+        return 200, [{'id': guild, 'name': f'server {guild}'} for guild in self.guild_ids], {}
 
     def guild_roles(self, query, body, guild):
-        if guild != GUILD:
+        if guild not in self.guild_ids:
             return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
-        return 200, self.server_roles, {}
+        return 200, self.server_roles if guild == GUILD else [], {}
+
+    def guild_emojis(self, query, body, guild):
+        if guild not in self.guild_ids:
+            return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
+        return 200, self.server_emojis.get(guild, []), {}
 
     def open_dm(self, query, body):
         if body != {'recipient_id': OWNER}:
@@ -254,7 +269,24 @@ class FakeDiscord:
         return 200, self.render(found), {}
 
     def react_me(self, query, body, channel, message, emoji):
-        self.react(message, emoji, BOT)
+        if not self.find(channel, message):
+            return 404, {'message': 'Unknown Message', 'code': 10008}, {}
+        name, _, number = emoji.partition(':')
+        known = [item for items in self.server_emojis.values() for item in items]
+        if number and not any(item['id'] == number and item['name'] == name for item in known):
+            return 400, {'message': 'Unknown Emoji', 'code': 10014}, {}
+        if BOT not in self.reactions.get(message, {}).get(emoji, []):
+            self.react(message, emoji, BOT)
+        return 204, None, {}
+
+    def unreact_me(self, query, body, channel, message, emoji):
+        if not self.find(channel, message):
+            return 404, {'message': 'Unknown Message', 'code': 10008}, {}
+        kept = self.reactions.get(message, {})
+        if BOT in kept.get(emoji, []):
+            kept[emoji].remove(BOT)
+            if not kept[emoji]:
+                del kept[emoji]
         return 204, None, {}
 
     def reactors(self, query, body, channel, message, emoji):
@@ -980,6 +1012,230 @@ class Attachments(WithDiscord):
         got = self.tool('discord_attachments', channel=GENERAL, message=number)
         self.assertTrue(got['files'][0]['error'].startswith(f'{folder / "a.png"} could not be written: '))
         self.assertEqual([p.name for p in folder.iterdir()], ['a.png'])
+
+
+class React(WithDiscord):
+    """discord_react and discord_unreact: a fixed few reactions, at once, on a message discord_read gives"""
+
+    def put(self, channel, message, emoji):
+        return self.fake.posts('PUT', f'/channels/{channel}/messages/{message}/reactions/{emoji}/@me')
+
+    def emojis_asked(self, guild=GUILD):
+        return len(self.fake.posts('GET', f'/guilds/{guild}/emojis'))
+
+    def test_each_reaction_goes_at_once_with_no_draft_and_stderr_says_whose_where_and_which(self):
+        asked = self.fake.say(GENERAL, OWNER, 'can you look at the build?')
+        for emoji in (EYES, YES, THUMBS, NO):
+            with self.subTest(emoji=emoji):
+                got = self.tool('discord_react', channel=GENERAL, message=asked, emoji=emoji)
+                self.assertEqual(got, {'status': 'reacted', 'channel': GENERAL, 'message': asked, 'emoji': emoji})
+                self.assertEqual(self.fake.reactions[asked][emoji], [BOT])
+                self.assertEqual(len(self.put(GENERAL, asked, emoji)), 1)
+        self.assertEqual((self.fake.messages[DM], self.clock.waits), ([], []))  # no draft, no wait
+        said = f'discord_react: reacted, {EYES} of AogoWimsy on message {asked} in channel {GENERAL}'
+        self.assertEqual(self.logs[:2], [said, 'discord_react: reacted'])
+        self.assertNotIn('can you look', ' '.join(self.logs))
+
+    def test_any_other_emoji_is_refused_naming_it_its_code_points_and_the_ones_taken(self):
+        asked = self.fake.say(GENERAL, OWNER, 'hello')
+        taken = f'not one AogoWimsy reacts with: it takes {EYES}, {YES}, {THUMBS}, {NO}, :wimsyaogo:'
+        party, selector = chr(0x1F389), chr(0xFE0F)
+        cases = (
+            (party, f'emoji is "{party}" (U+1F389), {taken}'),
+            (THUMBS + selector, f'emoji is "{THUMBS}{selector}" (U+1F44D U+FE0F), {taken}'),
+            ('wimsyaogo', f'emoji is "wimsyaogo", {taken}'),
+            (':wimsytetoutau:', f'emoji is ":wimsytetoutau:", {taken}'),
+            (WIMSY, f'emoji is "{WIMSY}", {taken}'),
+            ('', f'emoji is "", {taken}'),
+            (5, f'emoji is 5, {taken}'),
+        )
+        for tool in ('discord_react', 'discord_unreact'):
+            for emoji, said in cases:
+                with self.subTest(tool=tool, emoji=emoji):
+                    self.assertEqual(self.error(tool, channel=GENERAL, message=asked, emoji=emoji), said)
+        self.assertEqual((self.fake.requests, self.fake.reactions), ([], {}))
+        self.assertIn(f'discord_react failed: emoji is "{party}" (U+1F389), {taken}', self.logs)
+
+    def test_a_channel_it_may_not_read_is_refused_and_nothing_is_put(self):
+        elsewhere = self.fake.say(OTHER, OWNER, 'in a channel not listed')
+        in_thread = self.fake.say(OTHER_THREAD, OWNER, 'in a thread of it')
+        said = self.error('discord_react', channel=OTHER, message=elsewhere, emoji=EYES)
+        lists = f'channel {OTHER} is not one AogoWimsy may read: AOGOWIMSY_CHANNELS lists {GENERAL}, {HELP}'
+        self.assertIn(lists, said)
+        self.assertIn(f"the owner's DMs with AogoWimsy are {DM}", said)
+        said = self.error('discord_react', channel=OTHER_THREAD, message=in_thread, emoji=EYES)
+        self.assertIn(f'channel {OTHER_THREAD} is not one AogoWimsy may read', said)
+        said = self.error('discord_unreact', channel=OTHER, message=elsewhere, emoji=EYES)
+        self.assertIn(f'channel {OTHER} is not one AogoWimsy may read', said)
+        self.assertEqual([r for r in self.fake.requests if '/messages' in r[1]], [])  # the message never asked for
+        self.assertEqual(self.fake.reactions, {})
+        for channel in (THREAD, DM):  # a thread of a listed channel, and the owner's DMs, without being listed
+            number = self.fake.say(channel, OWNER, 'here')
+            self.assertEqual(
+                self.tool('discord_react', channel=channel, message=number, emoji=EYES)['status'], 'reacted'
+            )
+        self.bot.settings = self.settings._replace(channels=None)
+        self.assertEqual(self.tool('discord_react', channel=OTHER, message=elsewhere, emoji=EYES)['status'], 'reacted')
+
+    def test_a_strangers_message_the_owner_did_not_let_through_is_refused_naming_no_one(self):
+        theirs = self.fake.say(GENERAL, STRANGER, 'a secret of the stranger', mentions=[BOT])
+        said = self.error('discord_react', channel=GENERAL, message=theirs, emoji=EYES)
+        self.assertIn(f'message {theirs} is not one AogoWimsy gives', said)
+        self.assertNotIn(STRANGER, said)
+        self.assertFalse(self.put(GENERAL, theirs, EYES))
+        self.fake.react(theirs, WIMSY, OWNER)
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=theirs, emoji=EYES)['status'], 'reacted')
+
+    def test_a_draft_takes_no_reaction_and_loses_none(self):
+        draft = self.tool('discord_post', channel=GENERAL, text='hello', wait=0)['draft']
+        for tool in ('discord_react', 'discord_unreact'):
+            for emoji in (YES, EYES):
+                said = self.error(tool, channel=DM, message=draft, emoji=emoji)
+                self.assertEqual(
+                    said,
+                    f"message {draft} is a draft of AogoWimsy's: its {YES} and {NO} are for the owner's answer, and "
+                    f'{tool} touches no draft',
+                )
+        self.assertEqual(self.fake.reactions[draft], {YES: [BOT], NO: [BOT]})
+        self.assertFalse([r for r in self.fake.requests if r[0] == 'DELETE'])
+        plain = self.fake.say(DM, BOT, 'a plain message of its own')
+        self.assertEqual(self.tool('discord_react', channel=DM, message=plain, emoji=YES)['status'], 'reacted')
+
+    def test_twice_is_already_there_and_unreact_takes_off_its_own_alone(self):
+        asked = self.fake.say(GENERAL, FRIEND, 'is it fixed?')
+        self.fake.react(asked, EYES, OWNER)
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=asked, emoji=EYES)['status'], 'reacted')
+        again = self.tool('discord_react', channel=GENERAL, message=asked, emoji=EYES)
+        self.assertEqual(again, {'status': 'already there', 'channel': GENERAL, 'message': asked, 'emoji': EYES})
+        self.assertEqual(len(self.put(GENERAL, asked, EYES)), 1)
+        gone = self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=EYES)
+        self.assertEqual(gone, {'status': 'removed', 'channel': GENERAL, 'message': asked, 'emoji': EYES})
+        self.assertEqual(self.fake.reactions[asked], {EYES: [OWNER]})  # the owner's stays
+        self.assertEqual(
+            self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=EYES)['status'], 'not there'
+        )
+        self.assertEqual(
+            len(self.fake.posts('DELETE', f'/channels/{GENERAL}/messages/{asked}/reactions/{EYES}/@me')), 1
+        )
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=asked, emoji=YES)['status'], 'reacted')
+        self.assertEqual(self.fake.reactions[asked], {EYES: [OWNER], YES: [BOT]})
+        said = f'discord_unreact: not there, {EYES} of AogoWimsy on message {asked} in channel {GENERAL}'
+        self.assertIn(said, self.logs)
+
+    def test_wimsyaogo_goes_by_the_servers_emoji_asked_once_and_comes_off_by_its_own(self):
+        first, second = self.fake.say(GENERAL, OWNER, 'one'), self.fake.say(HELP, FRIEND, 'two')
+        for channel, number in ((GENERAL, first), (HELP, second)):
+            got = self.tool('discord_react', channel=channel, message=number, emoji=OWNERS)
+            self.assertEqual(got, {'status': 'reacted', 'channel': channel, 'message': number, 'emoji': OWNERS})
+            self.assertEqual(self.fake.reactions[number], {WIMSY: [BOT]})
+        self.assertEqual(self.emojis_asked(), 1)
+        self.assertFalse(self.fake.posts('GET', '/users/@me/guilds'))  # the channel's server had it
+        gone = self.tool('discord_unreact', channel=GENERAL, message=first, emoji=OWNERS)
+        self.assertEqual(gone['status'], 'removed')
+        self.assertEqual(self.fake.reactions[first], {})
+        self.assertEqual(self.emojis_asked(), 1)
+
+    def test_wimsyaogo_takes_the_id_a_reaction_on_the_message_has(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        theirs = self.fake.say(GENERAL, STRANGER, 'thanks', reply_to=mine)
+        self.fake.react(theirs, WIMSY, OWNER)  # the owner let it through
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=theirs, emoji=OWNERS)['status'], 'reacted')
+        self.assertEqual(self.fake.reactions[theirs], {WIMSY: [OWNER, BOT]})
+        self.assertEqual(self.emojis_asked(), 0)
+        said = self.error('discord_react', channel=GENERAL, message=mine, emoji='wimsyother')
+        self.assertIn('emoji is "wimsyother", not one AogoWimsy reacts with', said)
+
+    def test_wimsyaogo_in_the_owners_dms_or_a_server_without_it_comes_from_another_server_it_is_in(self):
+        self.fake.guild_ids.append(OTHER_GUILD)
+        made = 'wimsyaogo:600000000000000003'
+        self.fake.server_emojis = {GUILD: [], OTHER_GUILD: [{'id': made.split(':')[1], 'name': aw.WIMSY}]}
+        in_dm, in_general = self.fake.say(DM, OWNER, 'in the DMs'), self.fake.say(GENERAL, OWNER, 'in general')
+        for channel, number in ((DM, in_dm), (GENERAL, in_general)):
+            self.assertEqual(
+                self.tool('discord_react', channel=channel, message=number, emoji=OWNERS)['status'], 'reacted'
+            )
+            self.assertEqual(self.fake.reactions[number], {made: [BOT]})
+        self.assertEqual((self.emojis_asked(GUILD), self.emojis_asked(OTHER_GUILD)), (1, 1))
+
+    def test_wimsyaogo_no_server_has_is_refused_naming_the_servers_looked_in(self):
+        self.fake.guild_ids.append(OTHER_GUILD)
+        self.fake.server_emojis = {GUILD: [{'id': OTHER_EMOJI.split(':')[1], 'name': 'wimsyother'}]}
+        asked = self.fake.say(HELP, OWNER, 'hi')
+        said = self.error('discord_react', channel=HELP, message=asked, emoji=OWNERS)
+        self.assertEqual(
+            said,
+            f'no server AogoWimsy is in has an emoji named wimsyaogo (it looked in {GUILD}, {OTHER_GUILD}), so '
+            ':wimsyaogo: cannot be put',
+        )
+        self.assertEqual(self.fake.reactions, {})
+
+    def test_the_servers_emojis_are_asked_again_once_it_is_joined_again_or_discord_refuses_the_one_known(self):
+        asked = self.fake.say(GENERAL, OWNER, 'hi')
+        self.tool('discord_react', channel=GENERAL, message=asked, emoji=OWNERS)
+        self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=OWNERS)
+        renewed = 'wimsyaogo:600000000000000004'
+        self.fake.server_emojis[GUILD] = [{'id': renewed.split(':')[1], 'name': aw.WIMSY}]  # made again: a new id
+        aw.Ear(self.bot, lambda text, meta: None, threading.Event()).hear(
+            'GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []}
+        )
+        self.tool('discord_react', channel=GENERAL, message=asked, emoji=OWNERS)
+        self.assertEqual((self.fake.reactions[asked], self.emojis_asked()), ({renewed: [BOT]}, 2))
+        later, newest = self.fake.say(GENERAL, OWNER, 'again'), 'wimsyaogo:600000000000000005'
+        self.fake.server_emojis[GUILD] = [{'id': newest.split(':')[1], 'name': aw.WIMSY}]  # with no event this time
+        said = self.error('discord_react', channel=GENERAL, message=later, emoji=OWNERS)
+        quoted = urllib.parse.quote(renewed)
+        self.assertEqual(
+            said,
+            f'Discord answered 400 to PUT /channels/{GENERAL}/messages/{later}/reactions/{quoted}/@me: Unknown Emoji '
+            '(code 10014)',
+        )
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=later, emoji=OWNERS)['status'], 'reacted')
+        self.assertEqual((self.fake.reactions[later], self.emojis_asked()), ({newest: [BOT]}, 3))
+
+    def test_discords_refusal_shows_with_its_status_and_message(self):
+        asked = self.fake.say(GENERAL, OWNER, 'hi')
+        path = f'/channels/{GENERAL}/messages/{asked}/reactions/{EYES}/@me'
+        self.fake.fail[('PUT', path)] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=EYES)
+        quoted = urllib.parse.quote(EYES)
+        self.assertEqual(
+            said,
+            f'Discord answered 403 to PUT /channels/{GENERAL}/messages/{asked}/reactions/{quoted}/@me: Missing '
+            'Permissions (code 50013)',
+        )
+        self.assertEqual(self.logs, [f'discord_react failed: {said}'])
+        gone = '1500000000000000099'
+        said = self.error('discord_react', channel=GENERAL, message=gone, emoji=EYES)
+        self.assertEqual(
+            said, f'Discord answered 404 to GET /channels/{GENERAL}/messages/{gone}: Unknown Message (code 10008)'
+        )
+
+    def test_arguments_are_checked_before_discord_hears_of_them(self):
+        asked = '1500000000000000001'
+        self.assertEqual(self.error('discord_react', channel=GENERAL, message=asked), 'discord_react needs emoji')
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=EYES, text='hi')
+        self.assertEqual(said, 'discord_react has no argument "text"; it takes channel, message, emoji')
+        said = self.error('discord_unreact', channel=GENERAL, message='abc', emoji=EYES)
+        self.assertEqual(said, 'message is "abc", not a Discord id (17 to 20 digits)')
+        said = self.error('discord_unreact', channel=int(GENERAL), message=asked, emoji=EYES)
+        self.assertIn('channel is 300000000000000001, not a Discord id: write it as a string', said)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_the_tools_and_the_instructions_say_which_reactions_and_when(self):
+        tools = {tool['name']: tool for tool in aw.tool_list(aw.AOGO)}
+        self.assertEqual(list(tools), list(aw.TOOL_NAMES))
+        for name in ('discord_react', 'discord_unreact'):
+            emoji = tools[name]['inputSchema']['properties']['emoji']
+            self.assertEqual(emoji['enum'], [EYES, YES, THUMBS, NO, ':wimsyaogo:'])
+            self.assertEqual(tools[name]['inputSchema']['required'], ['channel', 'message', 'emoji'])
+        meanings = (
+            f"{EYES} (seen, on it), {YES} (done), {THUMBS} (agreed), {NO} (cannot), :wimsyaogo: (the owner's emoji)"
+        )
+        self.assertIn(meanings, tools['discord_react']['description'])
+        said = aw.instructions(self.settings)
+        self.assertIn(f'react to it with discord_react instead of posting: {meanings}', said)
+        self.assertIn(f'put {EYES} when you start on a message and, once done, take it off with discord_unreact', said)
+        self.assertIn("AogoWimsy's own :wimsyaogo: lets nothing through: only the owner's does", said)
 
 
 class SavesFolder(unittest.TestCase):
