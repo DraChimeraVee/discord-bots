@@ -70,6 +70,12 @@ class EnvFile(unittest.TestCase):
         said = self.refused(GOOD_ENV, aw.AOGO)
         self.assertIn('line 2: XUJIWIMSY_TOKEN is not a key AogoWimsy knows', said)
 
+    def test_it_greets_no_one_so_it_takes_no_greeting_key(self):
+        for key in ('XUJIWIMSY_GREET_HOURS', 'XUJIWIMSY_GREET_PER_HOUR', 'AOGOWIMSY_GREET_HOURS'):
+            said = self.refused(GOOD_ENV + f'{key}=24\n')
+            self.assertIn(f'line 7: {key} is not a key XujiWimsy knows; it knows {KNOWS}', said)
+        self.assertEqual((aw.XUJI.greeting, aw.XUJI.greet_keys), (None, ()))
+
     def test_its_values_are_checked_as_aogowimsys_naming_its_keys(self):
         self.assertIn('XUJIWIMSY_TOKEN is empty, and XujiWimsy needs it', self.refused(GOOD_ENV.replace(TOKEN, '')))
         said = self.refused(GOOD_ENV.replace(f'XUJIWIMSY_USERS = {FRIEND}', ''))
@@ -253,6 +259,17 @@ class News(WithXuji):
         self.assertEqual(content[1:], [{'type': 'text', 'text': news}])
         self.assertEqual(len(self.contents()), 1)  # said once
 
+    def test_a_strangers_call_gets_no_greeting_and_nothing_is_kept(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        for extra in ({'mentions': [BOT]}, {'reply_to': mine}):
+            number = self.fake.say(GENERAL, STRANGER, 'who is this?', **extra)
+            self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        self.assertEqual(self.fake.posts('POST', f'/channels/{GENERAL}/messages'), [])
+        self.assertIsNone(self.bot.greetings)
+        self.assertFalse(self.state.parent.joinpath('xujiwimsy').exists())
+        self.assertNotIn('greet', aw.instructions(self.settings))
+        self.assertEqual([line for line in self.logs if 'greet' in line], [])
+
     def test_the_gateways_news_come_with_a_tool_error_too(self):
         self.ear.report('trouble', 'OSError: down; it tries again, 60 s apart at most')
         self.ear.report('back', 'XujiWimsy hears Discord again')
@@ -346,7 +363,7 @@ class Stdio(unittest.TestCase):
             [{'type': 'text', 'text': 'channel is "general", not a Discord id (17 to 20 digits)'}],
         )
         errors = self.finish(proc)
-        self.assertIn(f'xujiwimsy: up: owner {OWNER}, 1 users, 2 channels', errors)
+        self.assertIn(f'xujiwimsy: up: owner {OWNER}, 1 users, 2 channels\n', errors)
         self.assertIn('xujiwimsy: discord_read failed: channel is "general"', errors)
         self.assertNotIn('aogowimsy', errors)
 

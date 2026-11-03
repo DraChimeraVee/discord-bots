@@ -15,10 +15,10 @@ Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy
 
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
-| `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through nine MCP tools: post (only once its owner approves the draft), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), and upload the server's custom emojis it answers with. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, the listed users' and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message | to Discord, the drafts (to its owner's DMs), the posts approved, its reactions and quick replies, the four emojis it uploads; to the session, the messages it may read and the ones addressed to it |
-| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and nine tools, with Xuji's bot and settings. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed: the session gets what a tool returns |
+| `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through nine MCP tools: post (only once its owner approves the draft), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), and upload the server's custom emojis it answers with. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, the listed users' and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message | to Discord, the drafts (to its owner's DMs), the posts approved, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it; to the session, the messages it may read and the ones addressed to it |
+| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and nine tools, with Xuji's bot and settings. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed (the session gets what a tool returns) and it greets no one |
 
-No bot keeps a message or logs what was said, and none pings anyone.
+No bot keeps a message or logs what was said, and none pings anyone but AogoWimsy's greeting, which pings its owner.
 
 ## AogoWimsy
 
@@ -46,26 +46,48 @@ WebSocket of its own: heartbeats, resume after a drop, a fresh session when Disc
 `from` (a list of ids, each the owner or a listed user; anyone else is an error naming the id) narrows read and wait to
 those authors: the others join the count of the left out, and wait returns only on one of theirs.
 
-Its owner's check mark is the only way a text gets out, and no setting turns it off. A reaction or a reply of one
-emoji alone carries no text, so `discord_react` and `discord_quick` go at once, and only with the emojis above: the
+Its owner's check mark is the only way a session's text gets out, and no setting turns it off. A reaction or a reply of
+one emoji alone carries no text, so `discord_react` and `discord_quick` go at once, and only with the emojis above: the
 server's instructions tell the session to react to say it saw a message or finished it (`:wimsyaogo_eyes:` when it
-starts, `:wimsyaogo_done:` in its place when done), the server's emoji before its unicode one, rather than post. It reads and posts in the listed
-channels and their threads, or, with none listed, in every channel and thread Discord lets the bot see (a channel it
-cannot see is Discord's 403 or 404, naming it); it reads its owner's DMs with it too. Of what it reads, only the
-owner's messages, the listed users' and its own reach the session; a stranger's message reaches it once the owner
-lets it through, the others are counted and nothing else of them given. The owner lets a stranger's message through,
-that one message:
+starts, `:wimsyaogo_done:` in its place when done), the server's emoji before its unicode one, rather than post. It
+reads and posts in the listed channels and their threads, or, with none listed, in every channel and thread Discord lets
+the bot see (a channel it cannot see is Discord's 403 or 404, naming it); it reads its owner's DMs with it too. Of what
+it reads, only the owner's messages, the listed users' and its own reach the session; a stranger's message reaches it
+once the owner lets it through, the others are counted and nothing else of them given. The owner lets a stranger's
+message through, that one message:
 
 - with his `:wimsyaogo:` reaction, on a message addressed to AogoWimsy (a mention, or a reply to one of its
   messages); only his reaction counts;
 - by replying to it with a message that mentions AogoWimsy, whoever wrote it; a listed user's reply lets nothing
   through.
 
+A stranger who calls AogoWimsy in a channel it reads (a mention of it or of its role, or a reply to one of its
+messages) gets at once, from the server itself and with no draft, this reply, which pings the owner and no one else
+(`allowed_mentions` names his id alone, and not the person it replies to):
+
+> I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets
+> through. <@AOGOWIMSY_OWNER>
+
+Once a person each 24 hours, and 10 an hour at most, everyone together (`AOGOWIMSY_GREET_HOURS` and
+`AOGOWIMSY_GREET_PER_HOUR` set both, below); past a limit the call is only counted, as any other stranger's message.
+A bot's or a webhook's call is not greeted, so two bots never greet each other, nor is a stranger's DM (the session
+gets its name, as before). The session hears nothing of a call, greeted or not, and its instructions say what the
+strangers get; the owner's `:wimsyaogo:` on the call still lets it through, and the session answers with a draft as
+always. A greeting Discord refuses (no Send Messages there, the call deleted) wakes the session as an `error` naming
+the channel and Discord's answer, and counts toward the limits. stderr says the channel, the message posted and the
+count of the hour, or why a call was only counted, never who called nor what they said.
+
 Nothing is stored but the attachments `discord_attachments` is asked for (folders 700, files 600, kept until someone
-removes them): a draft waiting is its message in the owner's DMs, read again at each look, so a restart loses none;
-what the owner let through is kept in memory while it runs; stderr says what ran or failed, never what was said nor
-who said it. A 429 waits its `retry_after` and tries again; any other failure comes back to the session with Discord's
-status and message, as does a value a tool refuses, named with what it takes.
+removes them), and the greetings of the last `AOGOWIMSY_GREET_HOURS` hours, the time and the person's id each, in
+`<XDG_STATE_HOME or ~/.local/state>/aogowimsy/greetings.json` (folder 700, file 600), so a restart keeps the limits.
+Every session started where `.mcp.json` names AogoWimsy runs a server of its own, and all of them hear the same call:
+each look at that file is made under the lock `greetings.lock` beside it, so one of them greets and the others see it
+done. A file there it did not write stops the greetings, and each call it hears then wakes the session as an `error`
+naming the file and what is wrong in it; nothing rewrites it until it is mended or removed. A draft waiting is its
+message in the owner's DMs, read again at each look, so a restart loses none; what the owner let through is kept in
+memory while it runs; stderr says what ran or failed, never what was said nor who said it. A 429 waits its `retry_after`
+and tries again; any other failure comes back to the session with Discord's status and message, as does a value a tool
+refuses, named with what it takes.
 
 It serves Claude Code alone, so that no other client posts as Aogo: an `initialize` whose `clientInfo` name is not
 `claude-code` (Claude Code's) gets an error naming that name and XujiWimsy, the server logs it, and nothing reaches
@@ -91,10 +113,10 @@ body:
 | `draft` | the owner's check mark or cross on a draft this session made, still waiting: it is posted or refused then, not on a tool's next look (another session's draft waits for that session) | `draft`, `status` (sent, not sent), `channel`; `message_id` once posted |
 | `error`, `notice` | the gateway stopped (a close code Discord takes no new try after: a token that is not the bot's, intents not turned on), cannot be reached for three tries in a row, or is back | |
 
-Nothing else wakes it: a message not addressed to AogoWimsy, anything a stranger says before the owner lets it
-through, its own messages. Without the flag, the gateway still runs and feeds `discord_wait`, and Claude Code drops
-the events. The session answers in Discord with `discord_post` (reply_to the `message_id`), which still waits for the
-owner's check mark.
+Nothing else wakes it: a message not addressed to AogoWimsy, anything a stranger says before the owner lets it through
+(a call it greeted too), its own messages. Without the flag, the gateway still runs and feeds `discord_wait`, and Claude
+Code drops the events. The session answers in Discord with `discord_post` (reply_to the `message_id`), which still waits
+for the owner's check mark.
 
 Its settings, a line each of its env file, `~/.config/aogowimsy/aogowimsy.env` unless `--env FILE` names another:
 
@@ -104,16 +126,20 @@ Its settings, a line each of its env file, `~/.config/aogowimsy/aogowimsy.env` u
 | `AOGOWIMSY_OWNER` | none: needed | the owner's user id: who approves every post and lets a stranger's message through |
 | `AOGOWIMSY_USERS` | none: needed | `id,id`: whose messages reach the session (the owner's always do) |
 | `AOGOWIMSY_CHANNELS` | every channel and thread the bot can see | `id,id`: where it reads and posts; a thread of one of them counts as it |
+| `AOGOWIMSY_GREET_HOURS` | `24` | 1 to 720: hours before the greeting goes to the same person again |
+| `AOGOWIMSY_GREET_PER_HOUR` | `10` | 0 to 100: greetings in an hour at most, everyone together; `0` greets no one |
 
 A key it does not know stops it, naming the key; so does an id that is not one, an empty or missing needed value, an
-empty `AOGOWIMSY_CHANNELS`, a key set twice, and an env file other users can read (its mode must be 600 or stricter: it
-says the mode it found). The server's instructions to the session say which channels are in effect. Setting it up,
-after its application (below):
+empty `AOGOWIMSY_CHANNELS`, a `GREET` value that is not a whole number in its range (it names the value), a key set
+twice, and an env file other users can read (its mode must be 600 or stricter: it says the mode it found). The server's
+instructions to the session say which channels and greeting limits are in effect. Setting it up, after its application
+(below):
 
 1. Its owner shares a server with it and lets that server's members send them DMs (the server's Privacy Settings,
    Direct Messages), or no draft reaches them.
 2. The env file, then a look at it: the line `up` names the owner, counts the users and the channels (or says every
-   channel it sees), or it says what is wrong and stops. Discord hears nothing until a session is initialized.
+   channel it sees) and gives the greeting's limits, or it says what is wrong and stops. Discord hears nothing until a
+   session is initialized.
 
        install -d -m 700 ~/.config/aogowimsy
        install -m 600 aogo/aogowimsy.env.example ~/.config/aogowimsy/aogowimsy.env   # then fill it in
@@ -131,7 +157,7 @@ Xuji, the Grok Build session, on Discord as a bot user of its own. `xuji/xujiwim
 Xuji's identity (the table `IDENTITIES` there): its bot, its env file and keys, its name in every text. Everything
 else is AogoWimsy's, a fix to one a fix to both: the nine tools above, with the same arguments, defaults and answers;
 the owner's check mark as the only way out; the owner, the listed users and the strangers he lets through; nothing
-stored, and stderr never saying what was said.
+stored, and stderr never saying what was said. It greets no one, and takes no `GREET` key.
 
 It serves any client but Claude Code: an `initialize` from `claude-code` gets an error naming it and AogoWimsy. It
 offers no channel (Grok Build shows no push), so it says in its instructions how Discord reaches the session:
@@ -201,7 +227,10 @@ reactions and quick replies: the emojis taken, any other or a text refused, the 
 draft, a custom emoji by its id and one not uploaded yet named; the upload: the fixed file as a data URI, one already
 there, the missing permission named), what the
 gateway's events push to the session (who and what wakes it, the owner's reaction and reply letting a stranger
-through), and its gateway client against a fake gateway on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the
+through; the greeting: its text, the one mention it lets ping, a reply to the bot counting as a call, once a person
+each 24 h and 10 an hour, a restart and a second server keeping both, the lock between servers, what is no call, the
+owner and listed users never greeted, Discord's refusal and a file it did not write said as errors), and its gateway
+client against a fake gateway on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the
 close codes that stop it, pings, messages in frames), and that lines from several threads never mix on stdout; XujiWimsy's env file and keys (the other bot's refused), its server,
 instructions and tools in its own names, the client each Wimsy serves, the news a tool result carries, a post as it
 reaches Discord, and the program itself on stdin and stdout.

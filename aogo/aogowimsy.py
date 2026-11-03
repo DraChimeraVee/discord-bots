@@ -33,18 +33,30 @@ XujiWimsy offers no channel, as its client shows no push: it stays on the gatewa
 posts a draft the moment the owner answers it, and the session hears through discord_wait; the gateway's news and
 the owner's answers to drafts come with its next tool result instead.
 
+A stranger (neither the owner nor listed) who calls AogoWimsy in a channel it reads (a mention of it or its role, or a
+reply to one of its messages; a person's, not a bot's nor a webhook's) gets at once, from the server itself, with no
+draft, GREETING as a reply: a fixed line saying who Aogo is that pings the owner and no one else. Once a person each
+GREET_HOURS hours and GREET_PER_HOUR an hour at most, everyone together (env file keys may set both); past a limit
+the call is only counted, as any other stranger's message, and the session hears nothing of a call either way. The
+owner's WIMSY reaction still lets the call through. A stranger's DM is not greeted: the session gets its name, once.
+XujiWimsy greets no one.
+
 Discord's REST API v10 (urllib) reads and posts; its gateway (a WebSocket of its own, ssl and socket) hears. It works
 in the channels <PREFIX>_CHANNELS lists and their threads, or in every one Discord lets it see when it lists none,
-and in the owner's DMs with it. The owner's check mark is the only way a text gets out: no setting turns it off.
-A reaction or a quick reply carries no text, so it goes at once, and only one of REACTIONS (QUICK for a reply).
-Nothing is stored but the attachments discord_attachments is asked for, in <XDG_CACHE_HOME or ~/.cache>/<server>/
-<channel>/<message>/ (folders 700, files 600): a draft waiting is a message in the owner's DMs, read again at each look,
-and stderr says what ran or failed, never what was said nor who said it.
+and in the owner's DMs with it. The owner's check mark is the only way a session's text gets out: no setting turns it
+off. A reaction or a quick reply carries no text, so it goes at once, and only one of REACTIONS (QUICK for a reply);
+the greeting is the server's fixed line, never the session's. Nothing is stored but the attachments
+discord_attachments is asked for, in <XDG_CACHE_HOME or ~/.cache>/<server>/<channel>/<message>/ (folders 700, files
+600), and the greetings of the last GREET_HOURS hours, the time and the person's id each, in <XDG_STATE_HOME or
+~/.local/state>/<server>/greetings.json (folder 700, file 600; every server of the bot shares it under the lock
+greetings.lock, so a call they all hear is greeted once): a draft waiting is a message in the owner's DMs, read again
+at each look, and stderr says what ran or failed, never what was said nor who said it.
 """
 
 import argparse
 import base64
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -79,6 +91,7 @@ class Identity(NamedTuple):
     prefix: str  # its env file's keys: PREFIX_TOKEN and on
     env: str  # its env file when --env names none
     claude: bool  # True: Claude Code alone, as a claude/channel; False: any client but Claude Code, with no push
+    greeting: str | None = None  # the line a stranger who calls the bot gets at once, {owner} his id; None: none
 
     def key(self, name):
         return f'{self.prefix}_{name}'
@@ -88,11 +101,34 @@ class Identity(NamedTuple):
         return tuple(self.key(name) for name in ('TOKEN', 'OWNER', 'USERS'))
 
     @property
+    def greet_keys(self):
+        """the keys of the greeting's limits, for a bot that greets"""
+        return tuple(self.key(name) for name in GREET_LIMITS) if self.greeting else ()
+
+    @property
     def keys(self):
-        return (*self.needed, self.key('CHANNELS'))
+        return (*self.needed, self.key('CHANNELS'), *self.greet_keys)
 
 
-AOGO = Identity('aogowimsy', 'AogoWimsy', 'Aogo', 'AOGOWIMSY', '~/.config/aogowimsy/aogowimsy.env', claude=True)
+# What a stranger who calls the bot gets at once, with no draft and no owner's check mark (DraVee, 2026-11-02:
+# "quando alguem sem permissao te chamar, vc me quotar (logicamente com limite pra n ter abuso) de forma automatica"):
+# this line alone, as a reply, pinging the owner and no one else. Each limit an env file key may set (GREET_LIMITS);
+# past one the call is only counted, as any other stranger's message.
+GREETING = (
+    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets "
+    'through. <@{owner}>'
+)
+GREET_HOURS = 24  # hours before one person is greeted again
+GREET_PER_HOUR = 10  # greetings in an hour at most, everyone's together; 0 greets no one
+GREET_LIMITS = {  # each limit's key (after the prefix): its default and the whole numbers it takes
+    'GREET_HOURS': (GREET_HOURS, 1, 720),
+    'GREET_PER_HOUR': (GREET_PER_HOUR, 0, 100),
+}
+GREETINGS_FILE, GREETINGS_LOCK = 'greetings.json', 'greetings.lock'  # in its state folder
+UNREAD = 'no stranger is greeted until it is mended or removed'  # a greetings file it cannot read
+AOGO = Identity(
+    'aogowimsy', 'AogoWimsy', 'Aogo', 'AOGOWIMSY', '~/.config/aogowimsy/aogowimsy.env', claude=True, greeting=GREETING
+)
 XUJI = Identity('xujiwimsy', 'XujiWimsy', 'Xuji', 'XUJIWIMSY', '~/.config/xujiwimsy/xujiwimsy.env', claude=False)
 IDENTITIES = (AOGO, XUJI)
 CLAUDE_CODE = 'claude-code'  # the clientInfo name Claude Code's MCP client gives (2.1.310)
@@ -193,6 +229,8 @@ class Settings(NamedTuple):
     users: frozenset
     channels: frozenset | None  # None: every channel Discord lets the bot see
     identity: Identity = AOGO
+    greet_hours: int = GREET_HOURS
+    greet_per_hour: int = GREET_PER_HOUR
 
 
 def shown(value):
@@ -267,7 +305,18 @@ def read_settings(path, identity=AOGO):
     owner = snowflake(values[owner_key], f'{path}: {owner_key}')
     users = id_list(path, users_key, values[users_key])
     channels = id_list(path, channels_key, values[channels_key]) if channels_key in values else None
-    return Settings(token, owner, users, channels, identity)
+    limits = []
+    for name, (default, low, high) in GREET_LIMITS.items():
+        key = identity.key(name)
+        limits.append(whole_text(path, key, values[key], low, high) if key in values else default)
+    return Settings(token, owner, users, channels, identity, *limits)
+
+
+def whole_text(path, key, value, low, high):
+    """an env file's value when it is a whole number from low to high, written in digits; else Refused naming it"""
+    if not re.fullmatch(r'[0-9]{1,9}', value) or not low <= int(value) <= high:
+        raise Refused(f'{path}: {key} is {shown(value)}, not a whole number from {low} to {high}')
+    return int(value)
 
 
 def id_list(path, key, value):
@@ -296,6 +345,24 @@ def reactions_text():
     return '; '.join(f':{name}: or {plain} ({meaning})' for name, plain, meaning in SAYS)
 
 
+def greeting_text(settings):
+    """the greeting in words, for the session: what a stranger who calls the bot gets, and its limits in effect"""
+    me, identity = settings.identity.title, settings.identity
+    if not identity.greeting:
+        return ''
+    if settings.greet_per_hour == 0:
+        return (
+            f'{me} greets no stranger who calls it ({identity.key("GREET_PER_HOUR")} is 0): the call is only counted. '
+        )
+    return (
+        f'A stranger who calls {me} in a channel it reads (a mention, or a reply to one of its messages) gets at once, '
+        f'with no draft and no {YES}, a reply from the server itself that pings the owner alone: '
+        f'"{identity.greeting.format(owner=settings.owner)}". Once a person each {settings.greet_hours} h, and '
+        f'{settings.greet_per_hour} an hour at most, everyone together; past that the call is only counted. You are '
+        f"told nothing of the call; the owner's :{WIMSY}: on it still lets it through to you, to answer with a draft. "
+    )
+
+
 def instructions(settings):
     """what the server tells the session about itself: how Discord reaches it, pushed or waited for"""
     me = settings.identity.title
@@ -306,7 +373,8 @@ def instructions(settings):
         f'of users {by_id(settings.users)} and its own reach you; the others are counted, but for a message the '
         f'owner let through: one addressed to {me} (a mention, or a reply to one of its messages) that he put '
         f'his :{WIMSY}: reaction on, or any he replied to while mentioning {me}. '
-        'To say you saw a message or finished what it asked, react to it with discord_react instead of posting, the '
+        + greeting_text(settings)
+        + 'To say you saw a message or finished what it asked, react to it with discord_react instead of posting, the '
         f"server's emoji first, its unicode one only while that is not uploaded: {reactions_text()}; and :{WIMSY}:, "
         "the owner's emoji. A reaction goes out at once, with no draft, and only these; put :wimsyaogo_eyes: when "
         'you start on a message and, once done, take it off with discord_unreact and put :wimsyaogo_done:. '
@@ -513,12 +581,95 @@ def images(value, title):
     return found
 
 
-def saves_folder(server, environ=None):
-    """where discord_attachments saves: XDG_CACHE_HOME when it is an absolute path (the XDG spec ignores any other),
-    else ~/.cache; then the server's name (aogowimsy, xujiwimsy)"""
-    base = (os.environ if environ is None else environ).get('XDG_CACHE_HOME') or ''
-    root = Path(base) if os.path.isabs(base) else Path.home() / '.cache'
+def xdg_folder(variable, fallback, server, environ=None):
+    """the XDG base folder a variable names when it is an absolute path (the XDG spec ignores any other), else
+    ~/fallback; then the server's name (aogowimsy, xujiwimsy)"""
+    base = (os.environ if environ is None else environ).get(variable) or ''
+    root = Path(base) if os.path.isabs(base) else Path.home() / fallback
     return root / server
+
+
+def saves_folder(server, environ=None):
+    """where discord_attachments saves: XDG_CACHE_HOME, else ~/.cache"""
+    return xdg_folder('XDG_CACHE_HOME', '.cache', server, environ)
+
+
+def state_folder(server, environ=None):
+    """where the greetings' limits are kept: XDG_STATE_HOME, else ~/.local/state"""
+    return xdg_folder('XDG_STATE_HOME', '.local/state', server, environ)
+
+
+def private_folder(folder):
+    """folder made, 700, and its parents as the user's umask has them"""
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(mode=0o700, exist_ok=True)
+
+
+class Greetings:
+    """the greetings the bot gave strangers, kept in a file of its state folder for every server of the bot to read:
+    each session runs one, they all hear the same call, and the lock file lets one of them greet it. The file holds
+    [time, person] for each greeting within the hours a person waits (GREET_HOURS or its key), time in seconds since
+    the epoch"""
+
+    def __init__(self, folder, now=time.time):
+        self.folder, self.now = Path(folder), now
+        self.path = self.folder / GREETINGS_FILE
+
+    def claim(self, person, hours, per_hour):
+        """(True, how many greetings the last hour holds with this one) when person may be greeted now, which is then
+        written down; else (False, why not, with the values). Refused for a file it did not write, OSError for one it
+        cannot read or write"""
+        private_folder(self.folder)
+        lock = os.open(self.folder / GREETINGS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)  # another server's look ends first; closing the file lets go
+            now = self.now()
+            kept = [item for item in self.read() if item[0] > now - hours * 3600]
+            last = max((when for when, who in kept if who == person), default=None)
+            if last is not None:
+                minutes = int(max(0.0, now - last) // 60)  # down: never says a wait is over that is not
+                ago = f'{minutes // 60} h {minutes % 60:02d} min'
+                return False, f'the caller was greeted {ago} ago: once each {hours} h'
+            hour = sum(1 for when, _ in kept if when > now - 3600)
+            if hour >= per_hour:
+                return False, f'{hour} greetings in the last hour: {per_hour} at most'
+            self.write(kept + [[now, person]])
+            return True, f'{hour + 1} of {per_hour} in the last hour'
+        finally:
+            os.close(lock)
+
+    def read(self):
+        """the greetings the file holds, [[time, person]]; none when there is no file yet"""
+        try:
+            text = self.path.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            return []
+        except UnicodeDecodeError as error:
+            raise Refused(f'{self.path} is not UTF-8 text (byte {error.start}): {UNREAD}') from None
+        try:
+            found = json.loads(text)
+        except ValueError as error:
+            raise Refused(f'{self.path} is not JSON ({error}): {UNREAD}') from None
+        items = found.get('greetings') if isinstance(found, dict) else None
+        if not isinstance(items, list):
+            raise Refused(f'{self.path} holds {shown(found)}, not {{"greetings": [[time, person], ...]}}: {UNREAD}')
+        for place, item in enumerate(items, 1):
+            good = isinstance(item, list) and len(item) == 2 and isinstance(item[1], str)
+            good = good and isinstance(item[0], (int, float)) and not isinstance(item[0], bool)
+            if not good or not SNOWFLAKE.fullmatch(item[1]):
+                raise Refused(f'{self.path}: greeting {place} is {shown(item)}, not [time, person id]: {UNREAD}')
+        return items
+
+    def write(self, items):
+        """the greetings, written whole beside the file then moved over it, so a reader never sees half"""
+        part = self.folder / f'.{GREETINGS_FILE}.part'
+        try:
+            with open(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w', encoding='utf-8') as out:
+                json.dump({'greetings': items}, out)
+            os.replace(part, self.path)
+        except OSError:
+            part.unlink(missing_ok=True)
+            raise
 
 
 def file_name(name, fallback):
@@ -728,12 +879,15 @@ class Hub:
 class Wimsy:
     """the tools: Discord with the settings' identity, channels, people and owner"""
 
-    def __init__(self, settings, discord, clock, hub=None, files=None, drawings=None):
+    def __init__(self, settings, discord, clock, hub=None, files=None, drawings=None, state=None):
         self.settings, self.discord, self.clock = settings, discord, clock
         self.title = settings.identity.title
         self.hub = hub or Hub()
         self.files = Path(files) if files else saves_folder(settings.identity.server)  # where discord_attachments saves
         self.drawings = Path(drawings or EMOJI_FOLDER).expanduser()  # where discord_emoji_upload reads DRAWN
+        # the greetings to strangers, for a bot that greets: a file of the state folder, touched at the first call
+        state = Path(state) if state else state_folder(settings.identity.server)
+        self.greetings = Greetings(state) if settings.identity.greeting else None
         self.known = {}  # its own user id, its roles and the owner's DM channel, asked once
         self.approved = set()  # the messages the owner let through while the gateway heard: their ids, in memory only
         self.guard = threading.Lock()
@@ -1162,6 +1316,28 @@ class Wimsy:
             'emoji': emoji,
         }
 
+    def greet(self, message):
+        """the identity's greeting, posted at once as a reply to a stranger's message that called the bot, pinging the
+        owner alone; nothing past a limit, and stderr says which. The id posted, or None. stderr names the channel and
+        the counts, never the caller nor what they said"""
+        channel, settings = message['channel_id'], self.settings
+        per_hour = settings.greet_per_hour
+        if per_hour == 0:
+            greeted, said = False, f'{settings.identity.key("GREET_PER_HOUR")} is 0'
+        else:
+            greeted, said = self.greetings.claim(message['author']['id'], settings.greet_hours, per_hour)
+        if not greeted:
+            log(f"greet: a stranger's call in channel {channel} is only counted: {said}")
+            return None
+        body = {
+            'content': settings.identity.greeting.format(owner=settings.owner),
+            'allowed_mentions': {'parse': [], 'users': [settings.owner], 'replied_user': False},
+            'message_reference': {'message_id': message['id'], 'channel_id': channel, 'fail_if_not_exists': True},
+        }
+        posted = self.discord('POST', f'/channels/{channel}/messages', body)['id']
+        log(f"greet: posted message {posted} replying to a stranger's call in channel {channel} ({said})")
+        return posted
+
     def emoji_upload(self, args, cancelled, progress):
         take(args, 'discord_emoji_upload', ('guild', 'name'), ())
         guild = snowflake(args['guild'], 'guild')
@@ -1566,8 +1742,9 @@ class Ear:
     """what the gateway hears, sorted: every message goes to the waits on its channel; the session gets, pushed as a
     channel event, each message addressed to the bot from the owner or a listed user, their DMs, a stranger's
     addressed message the owner let through with his WIMSY reaction, and only the name of a stranger who wrote in
-    DMs; the owner's reply that mentions the bot carries the message he replied to, and lets it through. Nothing
-    for anyone else."""
+    DMs; the owner's reply that mentions the bot carries the message he replied to, and lets it through. A stranger
+    who calls the bot in a channel gets the identity's greeting, within its limits, and the session hears nothing of
+    it. Nothing for anyone else."""
 
     def __init__(self, tools, push, stop):
         self.tools, self.hub, self.push, self.stop = tools, tools.hub, push, stop
@@ -1654,6 +1831,8 @@ class Ear:
             return
         channel = message['channel_id']
         if author not in people:
+            if self.tools.greetings and self.calls(message, me):
+                self.greet(message)
             return
         roles = self.tools.roles()
         if addressed(message, me, roles) and self.in_scope(channel):
@@ -1665,6 +1844,25 @@ class Ear:
                 else:
                     quoted = self.tools.discord('GET', f'/channels/{channel}/messages/{number}')
             self.tell(message, 'message', quoted)
+
+    def calls(self, message, me):
+        """whether a stranger's message calls the bot where it reads: a person's, not a bot's nor a webhook's (two bots
+        would greet each other), addressed to it, in a channel it may read"""
+        if message['author'].get('bot') or message.get('webhook_id'):
+            return False
+        return addressed(message, me, self.tools.roles()) and self.in_scope(message['channel_id'])
+
+    def greet(self, message):
+        """the greeting; its failure goes to the session as an error, and nothing else of the call does"""
+        channel = message['channel_id']
+        try:
+            self.tools.greet(message)
+        except (DiscordError, Refused, OSError) as error:
+            text = str(error) + ('; the call counts toward the limits' if isinstance(error, DiscordError) else '')
+            log(f'greet: failed in channel {channel}: {text}')
+            self.push(
+                f'{self.title} could not greet a stranger who called it in channel {channel}: {text}', {'kind': 'error'}
+            )
 
     def reaction(self, event):
         emoji = event.get('emoji') or {}
@@ -2289,7 +2487,12 @@ def main(argv=None, identity=AOGO):
         return [started(ear.run), started(gateway.run)]
 
     where = 'every channel it sees' if settings.channels is None else f'{len(settings.channels)} channels'
-    log(f'up: owner {settings.owner}, {len(settings.users)} users, {where}')
+    greets = ''
+    if identity.greeting and settings.greet_per_hour == 0:
+        greets = f', greeting no stranger ({identity.key("GREET_PER_HOUR")} is 0)'
+    elif identity.greeting:
+        greets = f', greeting a stranger once each {settings.greet_hours} h, {settings.greet_per_hour} an hour at most'
+    log(f'up: owner {settings.owner}, {len(settings.users)} users, {where}{greets}')
     serve(Server(tools, instructions(settings), write, listen, stop), sys.stdin.buffer, write)
 
 

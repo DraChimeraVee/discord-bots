@@ -6,6 +6,7 @@ pushes to the session, and the gateway client itself against a fake WebSocket ga
 import base64
 import email.parser
 import email.policy
+import fcntl
 import hashlib
 import http.server
 import json
@@ -13,6 +14,7 @@ import os
 import queue
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,9 @@ sys.path.insert(0, str(HERE))
 import aogowimsy as aw
 
 os.environ['no_proxy'] = os.environ['NO_PROXY'] = '127.0.0.1'  # the fakes, never through a proxy
+# the greetings' state folder of every Wimsy made here, the programs started too: never the user's ~/.local/state
+STATE_HOME = tempfile.TemporaryDirectory(prefix='aogowimsy-tests-')
+os.environ['XDG_STATE_HOME'] = STATE_HOME.name
 
 TOKEN = 'MTAwMDAw.fake-token_for.tests'
 PNG = b'\x89PNG\r\n\x1a\n a fake image'
@@ -42,6 +47,14 @@ OWNERS = f':{aw.WIMSY}:'  # the owner's custom emoji, as discord_react takes it
 DRAWN_IDS = {name: f'6000000000000001{n:02d}' for n, name in enumerate(aw.DRAWN)}  # once uploaded to the server
 CUSTOM = ':wimsyaogo_eyes:, :wimsyaogo_done:, :wimsyaogo_thumbsup:, :wimsyaogo_no:'
 PNG_EMOJI = b'\x89PNG\r\n\x1a\n an emoji'
+OTHER_BOT = '1000000000000000006'  # another bot on the server: a stranger, and a bot
+CALLERS = [f'10000000000000001{n:02d}' for n in range(12)]  # strangers the fake knows by id alone
+# the greeting as DraVee worded it (2026-11-02), and the one mention it lets ping
+LINE = (
+    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets "
+    f'through. <@{OWNER}>'
+)
+PINGS = {'parse': [], 'users': [OWNER], 'replied_user': False}
 INITIALIZE = {
     'protocolVersion': '2025-11-25',
     'capabilities': {},
@@ -77,6 +90,7 @@ class FakeDiscord:
             FRIEND: {'id': FRIEND, 'username': 'friend', 'global_name': None},
             STRANGER: {'id': STRANGER, 'username': 'stranger', 'global_name': 'Stranger'},
             OTHER_PERSON: {'id': OTHER_PERSON, 'username': 'other', 'global_name': 'Other'},
+            OTHER_BOT: {'id': OTHER_BOT, 'username': 'reiwimsy', 'global_name': 'ReiWimsy', 'bot': True},
         }
         guild = {'type': 0, 'guild_id': GUILD}
         self.channels = {
@@ -467,6 +481,27 @@ class EnvFile(unittest.TestCase):
         with self.assertRaisesRegex(aw.Refused, 'AOGOWIMSY_TOKEN is empty, and AogoWimsy needs it'):
             aw.read_settings(example)
 
+    def test_the_greetings_limits_are_read_checked_and_named(self):
+        settings = aw.read_settings(self.env(GOOD_ENV))
+        self.assertEqual((settings.greet_hours, settings.greet_per_hour), (aw.GREET_HOURS, aw.GREET_PER_HOUR))
+        self.assertEqual((aw.GREET_HOURS, aw.GREET_PER_HOUR), (24, 10))
+        settings = aw.read_settings(self.env(GOOD_ENV + 'AOGOWIMSY_GREET_HOURS=48\nAOGOWIMSY_GREET_PER_HOUR = 0\n'))
+        self.assertEqual((settings.greet_hours, settings.greet_per_hour), (48, 0))
+        hours, per_hour = 'not a whole number from 1 to 720', 'not a whole number from 0 to 100'
+        for line, said in (
+            ('AOGOWIMSY_GREET_HOURS=abc', f'AOGOWIMSY_GREET_HOURS is "abc", {hours}'),
+            ('AOGOWIMSY_GREET_HOURS=0', f'AOGOWIMSY_GREET_HOURS is "0", {hours}'),
+            ('AOGOWIMSY_GREET_HOURS=721', f'AOGOWIMSY_GREET_HOURS is "721", {hours}'),
+            ('AOGOWIMSY_GREET_HOURS=', f'AOGOWIMSY_GREET_HOURS is "", {hours}'),
+            ('AOGOWIMSY_GREET_PER_HOUR=101', f'AOGOWIMSY_GREET_PER_HOUR is "101", {per_hour}'),
+            ('AOGOWIMSY_GREET_PER_HOUR=-1', f'AOGOWIMSY_GREET_PER_HOUR is "-1", {per_hour}'),
+            ('AOGOWIMSY_GREET_PER_HOUR=1e1', f'AOGOWIMSY_GREET_PER_HOUR is "1e1", {per_hour}'),
+        ):
+            self.assertIn(said, self.refused(GOOD_ENV + line + '\n'))
+        example = (HERE / 'aogowimsy.env.example').read_text()  # it says the defaults the code has
+        self.assertIn(f'\n# AOGOWIMSY_GREET_HOURS={aw.GREET_HOURS}\n', example)
+        self.assertIn(f'\n# AOGOWIMSY_GREET_PER_HOUR={aw.GREET_PER_HOUR}\n', example)
+
     def test_a_missing_file_says_so(self):
         with self.assertRaisesRegex(aw.Refused, 'nowhere.env cannot be read'):
             aw.read_settings(str(Path(self.folder.name) / 'nowhere.env'))
@@ -486,6 +521,11 @@ class WithDiscord(unittest.TestCase):
         cls.http.server_close()
 
     def setUp(self):
+        state = tempfile.TemporaryDirectory()  # each test's greetings, and the restarts it makes
+        self.addCleanup(state.cleanup)
+        self.addCleanup(os.environ.__setitem__, 'XDG_STATE_HOME', os.environ['XDG_STATE_HOME'])
+        os.environ['XDG_STATE_HOME'] = state.name
+        self.state = Path(state.name) / 'aogowimsy'
         self.fake = self.http.fake = FakeDiscord()
         self.fake.origin = f'http://127.0.0.1:{self.http.server_port}'
         self.clock = FakeClock()
@@ -1493,6 +1533,12 @@ class SavesFolder(unittest.TestCase):
         self.assertEqual(aw.saves_folder('aogowimsy', {'XDG_CACHE_HOME': ''}), home)
         self.assertEqual(aw.saves_folder('aogowimsy', {}), home)
 
+    def test_the_greetings_state_is_xdg_state_home_when_absolute_else_the_home_one(self):
+        home = Path.home() / '.local' / 'state' / 'aogowimsy'
+        self.assertEqual(aw.state_folder('aogowimsy', {'XDG_STATE_HOME': '/var/tmp/s'}), Path('/var/tmp/s/aogowimsy'))
+        self.assertEqual(aw.state_folder('aogowimsy', {'XDG_STATE_HOME': 'relative/s'}), home)
+        self.assertEqual(aw.state_folder('aogowimsy', {}), home)
+
     def test_a_long_name_keeps_its_suffix_within_200_bytes(self):
         name = aw.file_name('é' * 300 + '.png', 'fallback')
         self.assertTrue(name.endswith('.png'))
@@ -1701,8 +1747,8 @@ class Protocol(WithDiscord):
         self.assertEqual([n['params']['progress'] for n in self.sent], [1.0, 2.0])
 
 
-class Channels(WithDiscord):
-    """what the gateway hears and what reaches the session as a channel event"""
+class Hearing(WithDiscord):
+    """an ear on the gateway's events, after READY and the server's GUILD_CREATE"""
 
     def setUp(self):
         super().setUp()
@@ -1725,6 +1771,10 @@ class Channels(WithDiscord):
         if self.fake.channels[channel].get('guild_id'):
             event['guild_id'] = self.fake.channels[channel]['guild_id']
         self.ear.hear('MESSAGE_REACTION_ADD', dict(event, emoji={'id': number or None, 'name': name}))
+
+
+class Channels(Hearing):
+    """what the gateway hears and what reaches the session as a channel event"""
 
     def test_the_owners_answer_to_a_draft_posts_it_at_once_with_no_tool_waiting(self):
         draft = self.tool('discord_post', channel=GENERAL, text='approved later', wait=0)['draft']
@@ -1935,6 +1985,249 @@ class Channels(WithDiscord):
         stop.set()
         thread.join(5)
         self.assertFalse(thread.is_alive())
+
+
+class Greet(Hearing):
+    """a stranger who calls AogoWimsy gets the fixed line at once, within its limits, and the session hears nothing"""
+
+    CALL = '<@1000000000000000001> who is this?'
+
+    def setUp(self):
+        super().setUp()
+        self.start = self.now = 1_800_000_000.0
+        self.bot.greetings.now = lambda: self.now
+
+    def greetings(self, channel=GENERAL):
+        """what AogoWimsy posted in a channel: the bodies of its POSTs"""
+        return [body for _, _, _, body in self.fake.posts('POST', f'/channels/{channel}/messages')]
+
+    def answered(self, channel=GENERAL):
+        """the messages each greeting in a channel replies to"""
+        return [body['message_reference']['message_id'] for body in self.greetings(channel)]
+
+    def call(self, who=STRANGER, channel=GENERAL):
+        return self.heard(channel, who, self.CALL, mentions=[BOT])
+
+    def counted(self, why, channel=GENERAL):
+        return f"greet: a stranger's call in channel {channel} is only counted: {why}"
+
+    def restarted(self, now):
+        """another server of the bot, as after a restart or in another session: the same state folder"""
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        fresh.greetings.now = lambda: now
+        ear = aw.Ear(fresh, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
+        ear.hear('READY', {'user': {'id': BOT}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'})
+        return ear
+
+    def test_a_strangers_mention_gets_the_line_at_once_as_a_reply_pinging_the_owner_alone(self):
+        number = self.call()
+        reference = {'message_id': number, 'channel_id': GENERAL, 'fail_if_not_exists': True}
+        self.assertEqual(
+            self.greetings(), [{'content': LINE, 'allowed_mentions': PINGS, 'message_reference': reference}]
+        )
+        posted = self.fake.last(GENERAL)
+        self.assertEqual((posted['author'], posted['message_reference']['message_id']), (BOT, number))
+        self.assertEqual(self.pushes, [])  # the session hears nothing of it
+        self.assertEqual((self.fake.messages[DM], self.fake.posts('POST', '/users/@me/channels')), ([], []))  # no DM
+        said = f"greet: posted message {posted['id']} replying to a stranger's call in channel {GENERAL} (1 of 10 "
+        self.assertEqual([line for line in self.logs if line.startswith('greet')], [said + 'in the last hour)'])
+        role = self.heard(HELP, OTHER_PERSON, f'<@&{BOT_ROLE}> and you?', mention_roles=[BOT_ROLE])
+        self.assertEqual(self.answered(HELP), [role])  # its role, as Discord's autocomplete picks it, calls it too
+        self.assertNotIn(STRANGER, ' '.join(self.logs))
+        self.assertNotIn('who is this', ' '.join(self.logs))
+
+    def test_a_reply_to_one_of_its_messages_calls_it_in_a_listed_channel_or_its_thread(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        theirs = self.fake.say(GENERAL, FRIEND, 'a post of a friend')
+        self.heard(GENERAL, OTHER_PERSON, 'answering the friend', reply_to=theirs)
+        self.assertEqual(self.greetings(), [])
+        number = self.heard(GENERAL, STRANGER, 'what is this bot?', reply_to=mine)
+        self.assertEqual(
+            [(body['content'], body['message_reference']['message_id']) for body in self.greetings()], [(LINE, number)]
+        )
+        in_thread = self.call(OTHER_PERSON, THREAD)
+        self.assertEqual(self.answered(THREAD), [in_thread])
+        self.assertEqual(self.pushes, [])
+
+    def test_a_second_call_within_24_hours_is_only_counted_and_one_after_them_is_greeted(self):
+        before = self.fake.say(GENERAL, FRIEND, 'before')
+        first = self.call()
+        greeting = self.fake.last(GENERAL)['id']
+        self.now += 23 * 3600 + 59 * 60 + 59
+        self.heard(GENERAL, STRANGER, 'thanks', reply_to=greeting)  # a reply to the greeting calls it too: no loop
+        self.call()
+        self.assertEqual(self.answered(), [first])
+        late = self.counted('the caller was greeted 23 h 59 min ago: once each 24 h')
+        self.assertEqual([line for line in self.logs if 'only counted' in line], [late, late])
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        self.assertEqual([m['author_id'] for m in got['messages']], [BOT])  # its greeting; the calls are counted
+        self.assertEqual(got['left_out'], 3)
+        self.now += 2
+        again = self.call()
+        self.assertEqual(self.answered(), [first, again])
+        self.assertEqual(self.pushes, [])
+
+    def test_the_eleventh_stranger_within_an_hour_is_only_counted_and_the_hour_rolls_on(self):
+        called = []
+        for caller in CALLERS[:11]:
+            called.append(self.call(caller))
+            self.now += 300  # five minutes apart: the eleventh at 50 minutes
+        self.assertEqual(self.answered(), called[:10])
+        self.assertEqual(self.logs[-1], self.counted('10 greetings in the last hour: 10 at most'))
+        self.now = self.start + 3601  # the first greeting is over an hour old
+        late = self.call(CALLERS[11])
+        self.assertEqual(self.answered(), called[:10] + [late])
+        self.assertTrue(self.logs[-1].endswith('(10 of 10 in the last hour)'), self.logs[-1])
+        self.assertEqual(self.pushes, [])
+
+    def test_the_owner_and_listed_users_reach_the_session_and_get_no_greeting(self):
+        self.call(OWNER)
+        self.call(FRIEND)
+        self.assertEqual([(text, meta['kind']) for text, meta in self.pushes], [(self.CALL, 'message')] * 2)
+        self.assertEqual(self.greetings(), [])
+        self.assertFalse((self.state / aw.GREETINGS_FILE).exists())
+
+    def test_the_owners_wimsy_still_lets_a_greeted_call_through_to_the_session(self):
+        number = self.call()
+        self.assertEqual(self.answered(), [number])
+        self.reacted(GENERAL, number, WIMSY, OWNER)
+        meta = {'kind': 'approved', 'author': 'Stranger', 'author_id': STRANGER, 'channel': GENERAL}
+        self.assertEqual(self.pushes, [(self.CALL, dict(meta, message_id=number))])
+        got = self.tool('discord_read', channel=GENERAL)
+        self.assertEqual([(m['id'], m['approved']) for m in got['messages']], [(number, True), (got['after'], False)])
+        self.assertEqual(self.answered(), [number])  # greeted once
+
+    def test_a_restart_keeps_the_limits_in_a_private_file(self):
+        callers = [STRANGER] + CALLERS[:9]
+        for caller in callers:
+            self.call(caller)
+        self.assertEqual(len(self.greetings()), 10)
+        path = self.state / aw.GREETINGS_FILE
+        self.assertEqual(json.loads(path.read_text()), {'greetings': [[self.now, caller] for caller in callers]})
+        modes = stat.S_IMODE(path.stat().st_mode), stat.S_IMODE(self.state.stat().st_mode)
+        self.assertEqual(modes, (0o600, 0o700))
+        self.ear = self.restarted(self.now + 1800)
+        self.call()  # once each 24 h, across the restart
+        self.call(OTHER_PERSON)  # and the eleventh within the hour
+        self.assertEqual(len(self.greetings()), 10)
+        said = [self.counted('the caller was greeted 0 h 30 min ago: once each 24 h')]
+        said.append(self.counted('10 greetings in the last hour: 10 at most'))
+        self.assertEqual(self.logs[-2:], said)
+        self.ear = self.restarted(self.now + 25 * 3600)  # a day on, the file still holds the old greetings
+        self.call()
+        self.assertEqual(len(self.greetings()), 11)
+        self.assertEqual(json.loads(path.read_text()), {'greetings': [[self.now + 25 * 3600, STRANGER]]})
+
+    def test_two_servers_hearing_one_call_greet_it_once(self):
+        other = self.restarted(self.now)  # another session's server, on the same gateway events
+        number = self.fake.say(GENERAL, STRANGER, self.CALL, mentions=[BOT])
+        for ear in (self.ear, other):
+            ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        self.assertEqual(self.answered(), [number])
+        self.assertEqual(self.logs[-1], self.counted('the caller was greeted 0 h 00 min ago: once each 24 h'))
+
+    def test_a_look_waits_while_another_server_holds_the_lock(self):
+        aw.private_folder(self.state)
+        held = os.open(self.state / aw.GREETINGS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        got = []
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            looking = aw.started(lambda: got.append(self.bot.greetings.claim(STRANGER, 24, 10)))
+            looking.join(0.3)
+            self.assertTrue(looking.is_alive())  # waiting for the other server's look to end
+            self.assertEqual(got, [])
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+        looking.join(5)
+        self.assertEqual(got, [(True, '1 of 10 in the last hour')])
+
+    def test_what_is_not_a_strangers_call_where_it_reads_gets_nothing(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        self.heard(GENERAL, STRANGER, 'talking to the room')
+        self.heard(GENERAL, STRANGER, 'naming someone', mentions=[FRIEND])
+        self.heard(GENERAL, STRANGER, '@everyone look', mention_everyone=True)
+        self.heard(GENERAL, STRANGER, 'another bot, a plain role', mention_roles=[OTHER_BOT_ROLE, HELPERS_ROLE])
+        self.call(STRANGER, OTHER)  # a channel not listed
+        self.call(STRANGER, OTHER_THREAD)  # a thread of one not listed
+        self.call(OTHER_BOT)  # a bot: two bots would greet each other
+        self.heard(GENERAL, OTHER_BOT, 'its answer', reply_to=mine)
+        self.heard(GENERAL, CALLERS[0], self.CALL, mentions=[BOT], webhook_id='800000000000000001')
+        self.heard(STRANGER_DM, STRANGER, 'in DMs, to aogo')
+        for channel in (GENERAL, OTHER, OTHER_THREAD, STRANGER_DM):
+            self.assertEqual(self.greetings(channel), [])
+        self.assertEqual([meta['kind'] for _, meta in self.pushes], ['dm'])  # a stranger's DM: its name, as before
+        self.assertFalse((self.state / aw.GREETINGS_FILE).exists())
+
+    def test_a_greeting_discord_refuses_is_an_error_to_the_session_and_counts(self):
+        route = ('POST', f'/channels/{GENERAL}/messages')
+        self.fake.fail[route] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        self.call()
+        said = (
+            f'AogoWimsy could not greet a stranger who called it in channel {GENERAL}: Discord answered 403 to POST '
+            f'/channels/{GENERAL}/messages: Missing Permissions (code 50013); the call counts toward the limits'
+        )
+        self.assertEqual(self.pushes, [(said, {'kind': 'error'})])
+        del self.fake.fail[route]
+        self.call()
+        self.assertEqual([m for m in self.fake.messages[GENERAL] if m['author'] == BOT], [])
+        self.assertEqual(self.logs[-1], self.counted('the caller was greeted 0 h 00 min ago: once each 24 h'))
+
+    def test_a_greetings_file_it_cannot_read_stops_the_greetings_says_so_and_stays(self):
+        aw.private_folder(self.state)
+        path = self.state / aw.GREETINGS_FILE
+        cases = (
+            ('{"greetings": [[1, "x"]', 'is not JSON (Expecting'),
+            ('[]', 'holds [], not {"greetings": [[time, person], ...]}'),
+            (
+                json.dumps({'greetings': [[True, STRANGER]]}),
+                f'greeting 1 is [true, "{STRANGER}"], not [time, person id]',
+            ),
+            (json.dumps({'greetings': [[1, 'someone']]}), 'greeting 1 is [1, "someone"], not [time, person id]'),
+        )
+        for text, why in cases:
+            path.write_text(text)
+            self.pushes.clear()
+            self.call()
+            [(said, meta)] = self.pushes
+            self.assertEqual(meta, {'kind': 'error'})
+            self.assertIn(f'could not greet a stranger who called it in channel {GENERAL}: {path}', said)
+            self.assertIn(why, said)
+            self.assertTrue(said.endswith(': no stranger is greeted until it is mended or removed'), said)
+            self.assertEqual(path.read_text(), text)  # left for the owner to see
+        self.assertEqual(self.greetings(), [])
+        path.unlink()
+        number = self.call()
+        self.assertEqual(self.answered(), [number])
+
+    def test_greet_per_hour_0_greets_no_one_and_greet_hours_sets_the_wait(self):
+        self.bot.settings = self.settings._replace(greet_per_hour=0)
+        self.call()
+        self.assertEqual(self.greetings(), [])
+        self.assertEqual(self.logs[-1], self.counted('AOGOWIMSY_GREET_PER_HOUR is 0'))
+        self.assertFalse(self.state.exists())
+        self.bot.settings = self.settings._replace(greet_hours=1)
+        first = self.call()
+        self.now += 1800
+        self.call()
+        self.assertEqual(self.logs[-1], self.counted('the caller was greeted 0 h 30 min ago: once each 1 h'))
+        self.now += 1801
+        again = self.call()
+        self.assertEqual(self.answered(), [first, again])
+
+    def test_the_instructions_tell_the_session_of_the_greeting_and_its_limits(self):
+        said = aw.instructions(self.settings)
+        self.assertIn(
+            f'gets at once, with no draft and no {YES}, a reply from the server itself that pings the owner alone: '
+            f'"{LINE}". Once a person each 24 h, and 10 an hour at most, everyone together; past that the call is only '
+            "counted. You are told nothing of the call; the owner's :wimsyaogo: on it still lets it through to you",
+            said,
+        )
+        others = aw.instructions(self.settings._replace(greet_hours=48, greet_per_hour=3))
+        self.assertIn('Once a person each 48 h, and 3 an hour at most', others)
+        none = aw.instructions(self.settings._replace(greet_per_hour=0))
+        self.assertIn('AogoWimsy greets no stranger who calls it (AOGOWIMSY_GREET_PER_HOUR is 0)', none)
+        self.assertNotIn(LINE, none)
 
 
 def ws_frame(opcode, payload, fin=True):
@@ -2327,7 +2620,10 @@ class Stdio(unittest.TestCase):
             answer['result']['content'][0]['text'], 'channel is "general", not a Discord id (17 to 20 digits)'
         )
         errors = self.finish(proc)
-        self.assertIn(f'aogowimsy: up: owner {OWNER}, 1 users, 2 channels', errors)
+        up = (
+            f'aogowimsy: up: owner {OWNER}, 1 users, 2 channels, greeting a stranger once each 24 h, 10 an hour at most'
+        )
+        self.assertIn(up + '\n', errors)
         self.assertIn('aogowimsy: discord_read failed: channel is "general"', errors)
 
     def test_a_2026_07_28_client_gets_method_not_found_for_discovery(self):
