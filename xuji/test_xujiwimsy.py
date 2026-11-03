@@ -144,7 +144,10 @@ class Handshake(WithXuji):
         self.assertNotIn('AOGO', text)
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         as_aogo = text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY')
-        self.assertEqual(json.loads(as_aogo), aogo)
+        self.assertEqual(json.loads(as_aogo), [tool for tool in aogo if tool['name'] != 'discord_allowed'])
+        self.assertEqual(aogo[-1]['name'], 'discord_allowed')  # AogoWimsy's command's, which XujiWimsy has not
+        call = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'discord_allowed'}}
+        self.assertIn('Unknown tool: "discord_allowed"; XujiWimsy has', self.server.handle(call)['error']['message'])
         self.assertEqual(
             self.server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})['result'], {'tools': xuji}
         )
@@ -265,10 +268,20 @@ class News(WithXuji):
             number = self.fake.say(GENERAL, STRANGER, 'who is this?', **extra)
             self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
         self.assertEqual(self.fake.posts('POST', f'/channels/{GENERAL}/messages'), [])
-        self.assertIsNone(self.bot.greetings)
+        self.assertIsNone(self.bot.store)
         self.assertFalse(self.state.parent.joinpath('xujiwimsy').exists())
         self.assertNotIn('greet', aw.instructions(self.settings))
         self.assertEqual([line for line in self.logs if 'greet' in line], [])
+
+    def test_it_has_no_command_registers_none_and_answers_no_interaction(self):
+        self.assertIsNone(aw.XUJI.command)
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertFalse([r for r in self.fake.requests if r[1].startswith('/applications/')])
+        event = {'id': '1600000000000000001', 'type': 2, 'token': 'token-1600000000000000001', 'channel_id': GENERAL}
+        self.ear.hear('INTERACTION_CREATE', dict(event, data={'name': 'aogo'}, member={'user': {'id': OWNER}}))
+        self.assertEqual(self.fake.answers, {})
+        self.assertEqual(self.bot.allowed(), {})
+        self.assertNotIn('allow', aw.instructions(self.settings))
 
     def test_the_gateways_news_come_with_a_tool_error_too(self):
         self.ear.report('trouble', 'OSError: down; it tries again, 60 s apart at most')

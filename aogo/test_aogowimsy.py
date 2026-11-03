@@ -48,6 +48,7 @@ DRAWN_IDS = {name: f'6000000000000001{n:02d}' for n, name in enumerate(aw.DRAWN)
 CUSTOM = ':wimsyaogo_eyes:, :wimsyaogo_done:, :wimsyaogo_thumbsup:, :wimsyaogo_no:'
 PNG_EMOJI = b'\x89PNG\r\n\x1a\n an emoji'
 OTHER_BOT = '1000000000000000006'  # another bot on the server: a stranger, and a bot
+APP = '900000000000000001'  # AogoWimsy's application, whose id is not its user's here
 CALLERS = [f'10000000000000001{n:02d}' for n in range(12)]  # strangers the fake knows by id alone
 # the greeting as DraVee worded it (2026-11-02), and the one mention it lets ping
 LINE = (
@@ -55,6 +56,7 @@ LINE = (
     f'through. <@{OWNER}>'
 )
 PINGS = {'parse': [], 'users': [OWNER], 'replied_user': False}
+READY = {'user': {'id': BOT}, 'application': {'id': APP}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'}
 INITIALIZE = {
     'protocolVersion': '2025-11-25',
     'capabilities': {},
@@ -81,6 +83,10 @@ class FakeDiscord:
         ('PUT', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)/@me', 'react_me'),
         ('DELETE', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)/@me', 'unreact_me'),
         ('GET', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)', 'reactors'),
+        ('GET', r'/applications/@me', 'application'),
+        ('GET', r'/applications/(\d+)/guilds/(\d+)/commands', 'guild_commands'),
+        ('PUT', r'/applications/(\d+)/guilds/(\d+)/commands', 'overwrite_commands'),
+        ('POST', r'/interactions/(\d+)/([^/]+)/callback', 'interaction_answer'),
     )
 
     def __init__(self):
@@ -127,6 +133,9 @@ class FakeDiscord:
         self.origin = 'http://127.0.0.1:9'  # the fake's own address, where its attachments are served
         self.blobs = {}  # an attachment's path: its bytes, as the CDN serves them
         self.serial = 1_500_000_000_000_000_000
+        self.commands = {}  # a server's commands of the application, as Discord gives them back
+        self.no_commands_scope = set()  # servers whose install lacks applications.commands
+        self.answers = {}  # an interaction's id: the answer it got, once
         self.lock = threading.Lock()
 
     def say(self, channel, author, content='', mentions=(), reply_to=None, **extra):
@@ -189,11 +198,12 @@ class FakeDiscord:
             return self.route(method, path, query, body, headers)
 
     def route(self, method, path, query, body, headers):
-        if headers.get('Authorization') != f'Bot {TOKEN}':
+        path = path.removeprefix('/api/v10')
+        answering = path.startswith('/interactions/')  # an interaction's answer: its token is in the path
+        if headers.get('Authorization') != (None if answering else f'Bot {TOKEN}'):
             return 401, {'message': '401: Unauthorized', 'code': 0}, {}
         if not (headers.get('User-Agent') or '').startswith('DiscordBot ('):
             return 400, {'message': 'no DiscordBot User-Agent', 'code': 0}, {}
-        path = path.removeprefix('/api/v10')
         self.requests.append((method, path, query, body))
         if (method, path) in self.limits:
             self.limits.remove((method, path))
@@ -323,6 +333,43 @@ class FakeDiscord:
 
     def reactors(self, query, body, channel, message, emoji):
         return 200, [self.users[u] for u in self.reactions.get(message, {}).get(emoji, [])], {}
+
+    def application(self, query, body):
+        return 200, {'id': APP, 'name': 'Aogo', 'bot': self.users[BOT]}, {}
+
+    def guild_commands(self, query, body, app, guild):
+        if app != APP or guild not in self.guild_ids:
+            return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
+        if guild in self.no_commands_scope:
+            return 403, {'message': 'Missing Access', 'code': 50001}, {}
+        return 200, self.commands.get(guild, []), {}
+
+    def overwrite_commands(self, query, body, app, guild):
+        status, said, extra = self.guild_commands(query, body, app, guild)
+        if status != 200:
+            return status, said, extra
+
+        def as_kept(item):  # as Discord gives an option back: required only when true, no empty lists
+            kept = {k: v for k, v in item.items() if not (k == 'required' and not v)}
+            if item.get('options'):
+                kept['options'] = [as_kept(each) for each in item['options']]
+            return kept
+
+        kept = []
+        for place, command in enumerate(body):
+            stored = dict(as_kept(command), id=f'80000000000000{place:04d}', application_id=APP, guild_id=guild)
+            stored.update(version='1', nsfw=False, name_localizations=None, description_localizations=None)
+            kept.append(stored)
+        self.commands[guild] = kept
+        return 200, kept, {}
+
+    def interaction_answer(self, query, body, number, token):
+        if token != f'token-{number}':
+            return 401, {'message': 'Invalid interaction token', 'code': 50027}, {}
+        if number in self.answers:
+            return 400, {'message': 'Interaction has already been acknowledged.', 'code': 40060}, {}
+        self.answers[number] = body
+        return 204, None, {}
 
 
 def form_body(kind, raw):
@@ -841,7 +888,10 @@ class Read(WithDiscord):
         both = self.tool('discord_read', channel=GENERAL, **{'from': [OWNER, FRIEND]})
         self.assertEqual([m['id'] for m in both['messages']], [ids[0], ids[2]])
         said = self.error('discord_read', channel=GENERAL, **{'from': [FRIEND, STRANGER]})
-        self.assertEqual(said, f'from item 2 is {STRANGER}, neither the owner ({OWNER}) nor a listed user ({FRIEND})')
+        self.assertEqual(
+            said,
+            f'from item 2 is {STRANGER}, neither the owner ({OWNER}), a listed user ({FRIEND}) nor one he allowed',
+        )
         self.assertIn(
             'from is []: a list of 1 or more ids', self.error('discord_read', channel=GENERAL, **{'from': []})
         )
@@ -1759,10 +1809,11 @@ class Hearing(WithDiscord):
         super().setUp()
         self.pushes = []
         self.ear = aw.Ear(self.bot, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
-        self.ear.hear('READY', {'user': {'id': BOT}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'})
+        self.ear.hear('READY', READY)
         guild = {'id': GUILD, 'channels': [self.fake.channels[c] for c in (GENERAL, HELP, OTHER)]}
         guild['threads'] = [self.fake.channels[THREAD], self.fake.channels[OTHER_THREAD]]
-        self.ear.hear('GUILD_CREATE', guild)
+        self.ear.hear('GUILD_CREATE', guild)  # which registers /aogo there
+        self.logs.clear()
 
     def heard(self, channel, author, content='', **extra):
         number = self.fake.say(channel, author, content, **extra)
@@ -2000,7 +2051,7 @@ class Greet(Hearing):
     def setUp(self):
         super().setUp()
         self.start = self.now = 1_800_000_000.0
-        self.bot.greetings.now = lambda: self.now
+        self.bot.store.now = lambda: self.now
 
     def greetings(self, channel=GENERAL):
         """what AogoWimsy posted in a channel: the bodies of its POSTs"""
@@ -2019,9 +2070,9 @@ class Greet(Hearing):
     def restarted(self, now):
         """another server of the bot, as after a restart or in another session: the same state folder"""
         fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
-        fresh.greetings.now = lambda: now
+        fresh.store.now = lambda: now
         ear = aw.Ear(fresh, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
-        ear.hear('READY', {'user': {'id': BOT}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'})
+        ear.hear('READY', READY)
         return ear
 
     def test_a_strangers_mention_gets_the_line_at_once_as_a_reply_pinging_the_owner_alone(self):
@@ -2090,7 +2141,7 @@ class Greet(Hearing):
         self.call(FRIEND)
         self.assertEqual([(text, meta['kind']) for text, meta in self.pushes], [(self.CALL, 'message')] * 2)
         self.assertEqual(self.greetings(), [])
-        self.assertFalse((self.state / aw.GREETINGS_FILE).exists())
+        self.assertFalse((self.state / 'greetings.json').exists())
 
     def test_the_owners_wimsy_still_lets_a_greeted_call_through_to_the_session(self):
         number = self.call()
@@ -2107,7 +2158,7 @@ class Greet(Hearing):
         for caller in callers:
             self.call(caller)
         self.assertEqual(len(self.greetings()), 10)
-        path = self.state / aw.GREETINGS_FILE
+        path = self.state / 'greetings.json'
         self.assertEqual(json.loads(path.read_text()), {'greetings': [[self.now, caller] for caller in callers]})
         modes = stat.S_IMODE(path.stat().st_mode), stat.S_IMODE(self.state.stat().st_mode)
         self.assertEqual(modes, (0o600, 0o700))
@@ -2133,11 +2184,11 @@ class Greet(Hearing):
 
     def test_a_look_waits_while_another_server_holds_the_lock(self):
         aw.private_folder(self.state)
-        held = os.open(self.state / aw.GREETINGS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        held = os.open(self.state / aw.STATE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
         got = []
         try:
             fcntl.flock(held, fcntl.LOCK_EX)
-            looking = aw.started(lambda: got.append(self.bot.greetings.claim(STRANGER, 24, 10)))
+            looking = aw.started(lambda: got.append(self.bot.limit('greetings', STRANGER)))
             looking.join(0.3)
             self.assertTrue(looking.is_alive())  # waiting for the other server's look to end
             self.assertEqual(got, [])
@@ -2145,7 +2196,7 @@ class Greet(Hearing):
             fcntl.flock(held, fcntl.LOCK_UN)
             os.close(held)
         looking.join(5)
-        self.assertEqual(got, [(True, '1 of 10 in the last hour')])
+        self.assertEqual(got, [(None, 1)])
 
     def test_what_is_not_a_strangers_call_where_it_reads_gets_nothing(self):
         mine = self.fake.say(GENERAL, BOT, 'a post of mine')
@@ -2162,7 +2213,7 @@ class Greet(Hearing):
         for channel in (GENERAL, OTHER, OTHER_THREAD, STRANGER_DM):
             self.assertEqual(self.greetings(channel), [])
         self.assertEqual([meta['kind'] for _, meta in self.pushes], ['dm'])  # a stranger's DM: its name, as before
-        self.assertFalse((self.state / aw.GREETINGS_FILE).exists())
+        self.assertFalse((self.state / 'greetings.json').exists())
 
     def test_a_greeting_discord_refuses_is_an_error_to_the_session_and_counts(self):
         route = ('POST', f'/channels/{GENERAL}/messages')
@@ -2180,15 +2231,12 @@ class Greet(Hearing):
 
     def test_a_greetings_file_it_cannot_read_stops_the_greetings_says_so_and_stays(self):
         aw.private_folder(self.state)
-        path = self.state / aw.GREETINGS_FILE
+        path = self.state / 'greetings.json'
         cases = (
             ('{"greetings": [[1, "x"]', 'is not JSON (Expecting'),
-            ('[]', 'holds [], not {"greetings": [[time, person], ...]}'),
-            (
-                json.dumps({'greetings': [[True, STRANGER]]}),
-                f'greeting 1 is [true, "{STRANGER}"], not [time, person id]',
-            ),
-            (json.dumps({'greetings': [[1, 'someone']]}), 'greeting 1 is [1, "someone"], not [time, person id]'),
+            ('[]', 'holds [], not {"greetings": [[time, person id], ...]}'),
+            (json.dumps({'greetings': [[True, STRANGER]]}), f': item 1 is [true, "{STRANGER}"], not [time, person id]'),
+            (json.dumps({'greetings': [[1, 'someone']]}), ': item 1 is [1, "someone"], not [time, person id]'),
         )
         for text, why in cases:
             path.write_text(text)
@@ -2233,6 +2281,428 @@ class Greet(Hearing):
         none = aw.instructions(self.settings._replace(greet_per_hour=0))
         self.assertIn('AogoWimsy greets no stranger who calls it (AOGOWIMSY_GREET_PER_HOUR is 0)', none)
         self.assertNotIn(LINE, none)
+
+
+HELP_TEXT = f'To ask me something, mention <@{BOT}> with what you need; DraVee lets it through.'
+OWNERS_HELP = (
+    'Yours alone:\n'
+    '/aogo allow user [time]: their messages to me reach the session; time 2h, 1d, 7d or perm, 1d without one\n'
+    '/aogo deny user: takes their allow back\n'
+    '/aogo allowed: who is allowed, and until when'
+)
+# /aogo as AogoWimsy registers it, word for word
+AOGO_COMMAND = {
+    'type': 1,
+    'name': 'aogo',
+    'description': "Aogo, DraVee's AI assistant on ScarletNX",
+    'default_member_permissions': None,
+    'options': [
+        {'type': 1, 'name': 'help', 'description': 'What Aogo is and how to ask it something'},
+        {
+            'type': 1,
+            'name': 'allow',
+            'description': "DraVee only: let someone's messages reach Aogo for a time",
+            'options': [
+                {'type': 6, 'name': 'user', 'description': 'Who to allow', 'required': True},
+                {
+                    'type': 3,
+                    'name': 'time',
+                    'description': 'For how long: 1 day without one',
+                    'choices': [
+                        {'name': '2 hours', 'value': '2h'},
+                        {'name': '1 day', 'value': '1d'},
+                        {'name': '7 days', 'value': '7d'},
+                        {'name': 'permanent', 'value': 'perm'},
+                    ],
+                },
+            ],
+        },
+        {
+            'type': 1,
+            'name': 'deny',
+            'description': "DraVee only: take someone's allow back",
+            'options': [{'type': 6, 'name': 'user', 'description': 'Whose allow to take back', 'required': True}],
+        },
+        {'type': 1, 'name': 'allowed', 'description': 'DraVee only: who is allowed, and until when'},
+    ],
+}
+
+
+class Commands(Hearing):
+    """/aogo: registered in each server, help for anyone, allow, deny and allowed for the owner alone"""
+
+    def setUp(self):
+        super().setUp()
+        self.start = self.now = 1_800_000_000.0
+        self.bot.store.now = lambda: self.now
+
+    def used(self, who, sub, channel=GENERAL, name='aogo', **options):
+        """a use of the command as the gateway brings it"""
+        self.fake.serial += 1
+        number = str(self.fake.serial)
+        values = [
+            {'name': key, 'type': aw.USER_OPTION if key == 'user' else aw.STRING_OPTION, 'value': value}
+            for key, value in options.items()
+        ]
+        data = {'id': '800000000000000000', 'name': name, 'type': 1, 'options': [{'type': 1, 'name': sub}]}
+        if values:
+            data['options'][0]['options'] = values
+        if 'user' in options:
+            user = options['user']
+            data['resolved'] = {'users': {user: self.fake.user(user)}, 'members': {user: {'nick': None}}}
+        return {
+            'id': number,
+            'application_id': APP,
+            'type': aw.APPLICATION_COMMAND,
+            'data': data,
+            'guild_id': GUILD,
+            'channel_id': channel,
+            'member': {'user': self.fake.user(who), 'roles': []},
+            'token': f'token-{number}',
+            'version': 1,
+        }
+
+    def use(self, who, sub, ear=None, **options):
+        """the answer's text a use of the command got, after the ear heard it"""
+        event = self.used(who, sub, **options)
+        (ear or self.ear).hear('INTERACTION_CREATE', event)
+        answer = self.fake.answers[event['id']]
+        self.assertEqual((answer['type'], answer['data']['flags']), (4, 64))  # a message its asker alone sees
+        self.assertEqual(answer['data']['allowed_mentions'], {'parse': []})  # pinging no one
+        return answer['data']['content']
+
+    def restarted(self, now):
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        fresh.store.now = lambda: now
+        ear = aw.Ear(fresh, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
+        ear.hear('READY', READY)
+        return fresh, ear
+
+    def notices(self):
+        return [(text, meta) for text, meta in self.pushes if meta['kind'] == 'notice']
+
+    def test_the_command_is_registered_in_each_server_as_it_is_and_again_only_when_it_differs(self):
+        path = f'/applications/{APP}/guilds/{GUILD}/commands'
+        self.assertEqual([body for _, _, _, body in self.fake.posts('PUT', path)], [[AOGO_COMMAND]])
+        self.assertEqual(aw.command_list(aw.AOGO), [AOGO_COMMAND])
+        self.assertFalse(self.fake.posts('GET', '/applications/@me'))  # READY's application id
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})  # seen again, or another server
+        self.assertEqual((len(self.fake.posts('GET', path)), len(self.fake.posts('PUT', path))), (2, 1))
+        self.assertEqual(self.logs, [f'commands: /aogo (help, allow, deny, allowed) already there in server {GUILD}'])
+        self.fake.commands[GUILD][0]['description'] = 'an older text'
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertEqual(len(self.fake.posts('PUT', path)), 2)
+        self.fake.commands[GUILD].append(dict(self.fake.commands[GUILD][0], name='old', id='800000000000000999'))
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertEqual([command['name'] for command in self.fake.commands[GUILD]], ['aogo'])
+        self.assertEqual(self.logs[-1], f'commands: /aogo (help, allow, deny, allowed) registered in server {GUILD}')
+        self.assertEqual(self.pushes, [])
+
+    def test_a_server_without_the_commands_scope_says_so_with_the_invite_that_gives_it(self):
+        self.fake.guild_ids.append(OTHER_GUILD)
+        self.fake.no_commands_scope.add(OTHER_GUILD)
+        self.ear.hear('GUILD_CREATE', {'id': OTHER_GUILD, 'channels': [], 'threads': []})
+        said = (
+            f'AogoWimsy could not register /aogo in server {OTHER_GUILD}: Discord answered 403 to GET /applications/'
+            f'{APP}/guilds/{OTHER_GUILD}/commands: Missing Access (code 50001): AogoWimsy needs the '
+            f'applications.commands scope in server {OTHER_GUILD} for /aogo; invite it again with '
+            f'https://discord.com/oauth2/authorize?client_id={APP}&scope=bot+applications.commands'
+            '&permissions=9070971030592'
+        )
+        self.assertEqual(self.pushes, [(said, {'kind': 'error'})])
+        self.ear.hear('GUILD_CREATE', {'id': OTHER_GUILD, 'unavailable': True})  # an outage: nothing asked
+        self.assertEqual(len(self.pushes), 1)
+
+    def test_without_readys_application_it_is_asked_once(self):
+        self.bot.known.pop('application')
+        for _ in range(2):
+            self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertEqual(len(self.fake.posts('GET', '/applications/@me')), 1)
+
+    def test_help_answers_anyone_alone_with_the_greetings_line_and_how_to_ask_the_owner_with_his_commands(self):
+        self.assertEqual(self.use(STRANGER, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.assertEqual(self.use(FRIEND, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.assertEqual(self.use(OWNER, 'help'), f'{LINE}\n{HELP_TEXT}\n{OWNERS_HELP}')
+        answers = [r for r in self.fake.requests if r[1].startswith('/interactions/')]
+        self.assertEqual(len(answers), 3)  # answered without the bot's token: the fake refuses one that has it
+        self.assertEqual(self.pushes, [])  # the session hears nothing of a help
+        self.assertEqual(self.logs[-1], f'commands: /aogo help answered in channel {GENERAL}')
+        self.assertNotIn(STRANGER, ' '.join(self.logs))
+        self.assertFalse(any('token-' in line for line in self.logs))
+
+    def test_help_for_a_stranger_keeps_the_greetings_limits_apart_from_the_greeting(self):
+        self.heard(GENERAL, STRANGER, '<@1000000000000000001> hi', mentions=[BOT])  # greeted: help is counted apart
+        self.assertEqual(self.use(STRANGER, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.now += 1800
+        self.assertEqual(self.use(STRANGER, 'help'), 'You asked 0 h 30 min ago: help comes once each 24 h.')
+        for caller in CALLERS[:9]:
+            self.assertEqual(self.use(caller, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.assertEqual(
+            self.use(CALLERS[9], 'help'), 'Help was asked 10 times in the last hour, 10 at most: ask later.'
+        )
+        for _ in range(3):  # the owner and the listed users are never held back
+            self.assertEqual(self.use(OWNER, 'help'), f'{LINE}\n{HELP_TEXT}\n{OWNERS_HELP}')
+            self.assertEqual(self.use(FRIEND, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.now += 24 * 3600
+        self.assertEqual(self.use(STRANGER, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.bot.settings = self.settings._replace(greet_per_hour=0)
+        self.assertEqual(
+            self.use(CALLERS[10], 'help'), 'AogoWimsy answers no stranger now: AOGOWIMSY_GREET_PER_HOUR is 0.'
+        )
+
+    def test_allow_deny_and_allowed_answer_anyone_but_the_owner_that_they_are_his(self):
+        for who in (STRANGER, FRIEND):
+            self.assertEqual(self.use(who, 'allow', user=OTHER_PERSON), f'Only <@{OWNER}> can use /aogo allow.')
+            self.assertEqual(self.use(who, 'deny', user=OTHER_PERSON), f'Only <@{OWNER}> can use /aogo deny.')
+            self.assertEqual(self.use(who, 'allowed'), f'Only <@{OWNER}> can use /aogo allowed.')
+        self.assertFalse((self.state / 'allowed.json').exists())
+        self.assertEqual(self.pushes, [])
+
+    def test_allow_takes_each_time_and_one_day_without_one_and_refuses_any_other_naming_it(self):
+        for time_value, seconds in (('2h', 7200), ('1d', 86400), ('7d', 604800), (None, 86400)):
+            options = {'user': STRANGER} if time_value is None else {'user': STRANGER, 'time': time_value}
+            said = self.use(OWNER, 'allow', **options)
+            until = int(self.now + seconds)
+            self.assertTrue(
+                said.startswith(f'<@{STRANGER}> is allowed until <t:{until}:f> (<t:{until}:R>): their '), said
+            )
+            self.assertEqual(self.bot.allowed()[STRANGER]['until'], self.now + seconds)
+        said = self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.assertTrue(said.startswith(f'<@{STRANGER}> is allowed for good, until you deny them: their messages'))
+        self.assertIsNone(self.bot.allowed()[STRANGER]['until'])
+        for wrong in ('forever', '3h', ''):
+            said = self.use(OWNER, 'allow', user=OTHER_PERSON, time=wrong)
+            self.assertEqual(said, f'time is "{wrong}", not one of 2h, 1d, 7d, perm: <@{OTHER_PERSON}> is not allowed.')
+        self.assertNotIn(OTHER_PERSON, self.bot.allowed())
+        self.assertEqual(len(self.notices()), 5)  # the five allows, none of the refused
+
+    def test_an_allow_is_told_to_the_session_and_a_new_one_says_the_one_it_replaces(self):
+        said = self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        until = int(self.now + 7200)
+        self.assertEqual(
+            said,
+            f'<@{STRANGER}> is allowed until <t:{until}:f> (<t:{until}:R>): their messages to me reach the session.',
+        )
+        text = (
+            f'The owner allowed Stranger ({STRANGER}) until 2027-01-15T10:00:00Z (2 hours): their messages addressed to '
+            "AogoWimsy reach you as a listed user's do, and discord_allowed lists them."
+        )
+        meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'until': '2027-01-15T10:00:00Z'}
+        self.assertEqual(self.notices(), [(text, meta)])
+        self.assertEqual(aw.utc(self.now + 7200), '2027-01-15T10:00:00Z')
+        said = self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.assertTrue(said.endswith(f'It ran until <t:{until}:f> (<t:{until}:R>) before.'), said)
+        text, meta = self.notices()[-1]
+        self.assertTrue(text.startswith(f'The owner allowed Stranger ({STRANGER}) for good, until he denies them:'))
+        self.assertTrue(text.endswith(' It ran until 2027-01-15T10:00:00Z before.'), text)
+        self.assertEqual(meta['until'], 'permanent')
+        self.assertEqual(self.logs[-1], 'channel: pushed a notice event')
+
+    def test_an_allowed_persons_calls_reach_the_session_as_a_listed_users_until_the_allow_runs_out(self):
+        before = self.fake.say(GENERAL, FRIEND, 'before')
+        self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        self.pushes.clear()
+        number = self.heard(GENERAL, STRANGER, '<@1000000000000000001> can you look?', mentions=[BOT])
+        meta = {'kind': 'message', 'author': 'Stranger', 'author_id': STRANGER, 'channel': GENERAL}
+        self.assertEqual(self.pushes, [('<@1000000000000000001> can you look?', dict(meta, message_id=number))])
+        self.heard(GENERAL, OTHER_PERSON, '<@1000000000000000001> and me?', mentions=[BOT])  # a stranger still
+        self.assertEqual(len(self.pushes), 1)
+        self.assertEqual(len(self.fake.posts('POST', f'/channels/{GENERAL}/messages')), 1)  # its greeting alone
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        self.assertIn(number, [m['id'] for m in got['messages']])
+        self.assertEqual(
+            self.tool('discord_read', channel=GENERAL, after=before, **{'from': [STRANGER]})['messages'][0]['id'],
+            number,
+        )
+        self.now += 7200  # it runs out: nothing is said to them, and they are a stranger again
+        self.pushes.clear()
+        self.heard(GENERAL, STRANGER, '<@1000000000000000001> still there?', mentions=[BOT])
+        self.assertEqual(self.pushes, [])
+        self.assertNotIn(
+            number, [m['id'] for m in self.tool('discord_read', channel=GENERAL, after=before)['messages']]
+        )
+        self.assertIn('nor one he allowed', self.error('discord_read', channel=GENERAL, **{'from': [STRANGER]}))
+        bodies = [body for _, _, _, body in self.fake.posts('POST', f'/channels/{GENERAL}/messages')]
+        self.assertEqual([body['content'] for body in bodies], [LINE, LINE])  # a stranger's call is greeted again
+
+    def test_an_allowed_persons_message_ends_a_wait_and_their_dm_reaches_the_session(self):
+        self.use(OWNER, 'allow', user=STRANGER)
+        after = self.fake.say(GENERAL, OWNER, 'start')
+        self.clock.at(1, lambda: self.arrive(GENERAL, STRANGER, 'here'))
+        got = self.tool('discord_wait', channel=GENERAL, after=after, wait=10)
+        self.assertEqual(got['message']['author_id'], STRANGER)
+        self.pushes.clear()
+        self.heard(STRANGER_DM, STRANGER, 'in DMs')
+        self.assertEqual([(text, meta['kind']) for text, meta in self.pushes], [('in DMs', 'message')])
+
+    def test_deny_takes_an_allow_back_says_so_and_refuses_what_it_cannot_take(self):
+        self.use(OWNER, 'allow', user=STRANGER, time='7d')
+        until = int(self.now + 604800)
+        self.now += 60
+        said = self.use(OWNER, 'deny', user=STRANGER)
+        self.assertEqual(said, f'<@{STRANGER}> is not allowed anymore; it ran until <t:{until}:f> (<t:{until}:R>).')
+        text = (
+            f'The owner took back the allow of Stranger ({STRANGER}), which ran until 2027-01-22T08:00:00Z: their '
+            "messages are a stranger's again"
+        )
+        meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'until': 'denied'}
+        self.assertEqual(self.notices()[-1], (text, meta))
+        self.assertEqual(self.bot.allowed(), {})
+        self.assertEqual(self.use(OWNER, 'deny', user=STRANGER), f'<@{STRANGER}> has no allow to take back.')
+        self.assertEqual(
+            self.use(OWNER, 'deny', user=FRIEND),
+            f'<@{FRIEND}> is listed in AOGOWIMSY_USERS: their messages always reach the session, and the env file '
+            'takes them out.',
+        )
+        self.assertEqual(
+            self.use(OWNER, 'allow', user=OWNER), f'<@{OWNER}> is the owner: his messages always reach the session.'
+        )
+        self.assertEqual(self.use(OWNER, 'allow', user=BOT), f'<@{BOT}> is AogoWimsy itself.')
+        self.assertEqual(len(self.notices()), 2)
+
+    def test_allowed_and_discord_allowed_list_the_allows_in_force_the_soonest_end_first(self):
+        self.assertEqual(
+            self.use(OWNER, 'allowed'), f'No one is allowed now.\nListed in AOGOWIMSY_USERS, always: <@{FRIEND}>'
+        )
+        self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.use(OWNER, 'allow', user=OTHER_PERSON, time='7d')
+        self.use(OWNER, 'allow', user=CALLERS[0], time='2h')
+        self.now += 7200  # the 2 h one runs out
+        week = int(self.start + 604800)
+        self.assertEqual(
+            self.use(OWNER, 'allowed'),
+            f'Allowed:\n<@{OTHER_PERSON}> (Other): until <t:{week}:f> (<t:{week}:R>)\n<@{STRANGER}> (Stranger): for good\n'
+            f'Listed in AOGOWIMSY_USERS, always: <@{FRIEND}>',
+        )
+        got = self.tool('discord_allowed')
+        self.assertEqual(
+            got,
+            {
+                'allowed': [
+                    {'user_id': OTHER_PERSON, 'name': 'Other', 'since': aw.utc(self.start), 'until': aw.utc(week)},
+                    {'user_id': STRANGER, 'name': 'Stranger', 'since': aw.utc(self.start), 'until': None},
+                ],
+                'listed': [FRIEND],
+                'now': aw.utc(self.now),
+            },
+        )
+        self.assertIn('discord_allowed has no argument "x"', self.error('discord_allowed', x=1))
+
+    def test_allowed_past_a_messages_letters_says_how_many_more_discord_allowed_lists(self):
+        many = [f'10000000000000002{n:02d}' for n in range(60)]  # 60 lines of 43 letters
+        for user in many:
+            self.use(OWNER, 'allow', user=user, time='perm')
+        said = self.use(OWNER, 'allowed')
+        lines = said.split('\n')
+        self.assertLessEqual(len(said), 2000)
+        shown = len(lines) - 3  # Allowed:, the count of the rest, the listed users
+        self.assertEqual(lines[-2], f'{60 - shown} more: discord_allowed lists them all.')
+        self.assertEqual(lines[1:3], [f'<@{many[0]}> (webhook): for good', f'<@{many[1]}> (webhook): for good'])
+        self.assertEqual(len(self.tool('discord_allowed')['allowed']), 60)
+
+    def test_a_restart_keeps_the_allows_and_their_ends_in_a_private_file(self):
+        self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        self.use(OWNER, 'allow', user=OTHER_PERSON, time='perm')
+        path = self.state / 'allowed.json'
+        modes = stat.S_IMODE(path.stat().st_mode), stat.S_IMODE(self.state.stat().st_mode)
+        self.assertEqual(modes, (0o600, 0o700))
+        fresh, ear = self.restarted(self.now + 3600)
+        self.assertEqual(set(fresh.allowed()), {STRANGER, OTHER_PERSON})
+        self.pushes.clear()
+        number = self.fake.say(GENERAL, STRANGER, 'after a restart <@1000000000000000001>', mentions=[BOT])
+        ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        self.assertEqual([meta['kind'] for _, meta in self.pushes], ['message'])
+        fresh.store.now = lambda: self.now + 7201
+        self.assertEqual(set(fresh.allowed()), {OTHER_PERSON})
+
+    def test_two_servers_hearing_one_use_answer_it_once_and_each_tells_its_session(self):
+        _, other = self.restarted(self.now)
+        event = self.used(OWNER, 'allow', user=STRANGER)
+        for ear in (self.ear, other, other, self.ear):  # and the gateway's replay of it
+            ear.hear('INTERACTION_CREATE', event)
+        self.assertEqual(len(self.fake.posts('POST', f'/interactions/{event["id"]}/token-{event["id"]}/callback')), 1)
+        self.assertEqual(len(self.notices()), 2)  # once from each server
+        self.assertEqual(self.notices()[0], self.notices()[1])
+        later = f'commands: /aogo allow in channel {GENERAL} was answered by another server of AogoWimsy'
+        self.assertEqual(self.logs.count(later), 3)
+
+    def test_a_use_waits_while_another_server_holds_the_lock(self):
+        aw.private_folder(self.state)
+        held = os.open(self.state / aw.STATE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        event = self.used(OWNER, 'allow', user=STRANGER)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            looking = aw.started(lambda: self.ear.hear('INTERACTION_CREATE', event))
+            looking.join(0.3)
+            self.assertTrue(looking.is_alive())  # waiting for the other server's look and change to end
+            self.assertNotIn(event['id'], self.fake.answers)
+            self.assertFalse((self.state / 'interactions.json').exists())
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+        looking.join(5)
+        self.assertIn(event['id'], self.fake.answers)
+        self.assertIn(STRANGER, self.bot.allowed())
+
+    def test_a_use_is_answered_in_a_thread_of_its_own_ahead_of_the_queue(self):
+        event = self.used(STRANGER, 'help')
+        self.ear.feed('INTERACTION_CREATE', event)  # no ear.run: the queue is never read
+        for _ in range(500):
+            if event['id'] in self.fake.answers:
+                break
+            time.sleep(0.01)
+        self.assertEqual(self.fake.answers[event['id']]['data']['content'], f'{LINE}\n{HELP_TEXT}')
+        self.assertTrue(self.ear.queue.empty())
+
+    def test_an_answer_discord_refuses_is_an_error_without_its_token_and_the_allow_holds(self):
+        event = self.used(OWNER, 'allow', user=STRANGER)
+        self.fake.answers[event['id']] = 'answered already'
+        self.ear.hear('INTERACTION_CREATE', event)
+        said = (
+            f'AogoWimsy could not answer /aogo allow in channel {GENERAL}: Discord answered 400 to POST /interactions/'
+            f'{event["id"]}/<token>/callback: Interaction has already been acknowledged. (code 40060)'
+        )
+        self.assertEqual([text for text, meta in self.pushes if meta['kind'] == 'error'], [said])
+        self.assertEqual(len(self.notices()), 1)
+        self.assertIn(STRANGER, self.bot.allowed())
+        self.assertNotIn('token-', json.dumps([self.pushes, self.logs]))
+
+    def test_a_state_file_it_cannot_read_is_said_to_the_session_and_answered_to_the_asker(self):
+        aw.private_folder(self.state)
+        path = self.state / 'allowed.json'
+        path.write_text('{"allowed": [{"id": 5}]}')
+        said = self.use(OWNER, 'allow', user=STRANGER)
+        self.assertTrue(said.startswith(f'AogoWimsy could not answer this: {path}: item 1 is {{"id": 5}}, not '), said)
+        self.assertTrue(said.endswith('no allow is read until it is mended or removed.'), said)
+        self.assertEqual(self.use(STRANGER, 'allowed'), f'Only <@{OWNER}> can use /aogo allowed.')
+        told = "AogoWimsy could not answer this: its owner's session was told why."
+        self.assertEqual(self.use(STRANGER, 'help'), told)  # whether they are allowed is read for help too
+        errors = [text for text, meta in self.pushes if meta['kind'] == 'error']
+        self.assertEqual(
+            [text.split(': ')[0] for text in errors],
+            [f'AogoWimsy could not answer /aogo {sub} in channel {GENERAL}' for sub in ('allow', 'help')],
+        )
+        self.assertTrue(all(f': {path}: item 1 is ' in text for text in errors), errors)
+        self.assertEqual(path.read_text(), '{"allowed": [{"id": 5}]}')
+
+    def test_another_subcommand_or_command_is_answered_naming_what_it_has(self):
+        self.assertEqual(
+            self.use(OWNER, 'forget'), '/aogo forget is not a command of AogoWimsy: it has help, allow, deny, allowed.'
+        )
+        event = self.used(OWNER, 'help', name='other')
+        self.ear.hear('INTERACTION_CREATE', event)
+        self.assertEqual(
+            self.fake.answers[event['id']]['data']['content'], '/other is not a command of AogoWimsy: it has /aogo.'
+        )
+        self.ear.hear('INTERACTION_CREATE', dict(event, id='1600000000000000001', type=3))  # a button: none here
+        self.assertNotIn('1600000000000000001', self.fake.answers)
+
+    def test_the_instructions_and_tools_tell_the_session_of_the_allows(self):
+        said = aw.instructions(self.settings)
+        self.assertIn('/aogo allow', said)
+        self.assertIn('discord_allowed', said)
+        self.assertIn('kind="notice"', said)
+        self.assertIn('discord_allowed', [tool['name'] for tool in aw.tool_list(aw.AOGO)])
 
 
 def ws_frame(opcode, payload, fin=True):
