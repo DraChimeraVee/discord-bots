@@ -166,9 +166,10 @@ REACTIONS = (*QUICK, f':{WIMSY}:')  # what discord_react puts. Constants, not se
 EMOJI_FOLDER = '~/WorkDir/ScarletNX/wimsy-dist/emoji'  # the owner's clone of wimsy-dist: <name>.png of each of DRAWN
 MOST_EMOJI = 256 << 10  # bytes of an emoji's image Discord takes at most
 CREATE_EXPRESSIONS = 1 << 43  # the permission POST /guilds/{guild}/emojis needs
+ATTACH_FILES = 1 << 15  # the permission a post with images (discord_post's files) needs
 # The permissions of the README's invite: View Channels, Send Messages, Add Reactions, Read Message History, Send
-# Messages in Threads
-INVITE = 1 << 10 | 1 << 11 | 1 << 6 | 1 << 16 | 1 << 38
+# Messages in Threads, Attach Files
+INVITE = 1 << 10 | 1 << 11 | 1 << 6 | 1 << 16 | 1 << 38 | ATTACH_FILES
 DM, THREADS, REPLY = 1, (10, 11, 12), 19  # channel types (a DM; the three threads) and a reply's message type
 SNOWFLAKE = re.compile(r'[0-9]{17,20}')
 TOKEN_LETTER = re.compile(r'[A-Za-z0-9._-]')

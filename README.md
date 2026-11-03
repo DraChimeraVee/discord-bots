@@ -249,9 +249,9 @@ One application each, in the Developer Portal:
    signature, so the profile says who writes).
 3. Invite (OAuth2, scope `bot`), with only what it needs:
    - AogoWimsy and XujiWimsy: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add
-     Reactions (`discord_react`; the drafts, their card and their reactions are in DMs, which need none):
-     `permissions=274877975616`. A custom emoji of another server than the message's also needs Use External
-     Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070970997824` with it.
+     Reactions (`discord_react`), Attach Files (`discord_post`'s images; the drafts, their card and their reactions
+     are in DMs, which need none): `permissions=274878008384`. A custom emoji of another server than the message's
+     also needs Use External Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070971030592` with it.
 
    `https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=<number>`
 

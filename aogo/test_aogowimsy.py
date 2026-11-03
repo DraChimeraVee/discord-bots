@@ -1480,16 +1480,21 @@ class EmojiUpload(WithDiscord):
     def test_without_create_expressions_the_error_names_it_and_the_invite_with_it(self):
         self.fake.fail[('POST', f'/guilds/{GUILD}/emojis')] = (403, {'message': 'Missing Permissions', 'code': 50013})
         said = self.refused(guild=GUILD, name='wimsyaogo_no')
-        self.assertEqual(274877975616 + (1 << 43), 9070970997824)
+        self.assertEqual(274878008384 + (1 << 43), 9070971030592)
         self.assertEqual(
             said,
             f'Discord answered 403 to POST /guilds/{GUILD}/emojis: Missing Permissions (code 50013): AogoWimsy needs '
             f'Create Expressions (8796093022208) in server {GUILD}; give its role that permission (Server Settings, '
-            'Roles), or invite it again with permissions=9070970997824',
+            'Roles), or invite it again with permissions=9070971030592',
         )
         self.fake.fail[('POST', f'/guilds/{GUILD}/emojis')] = (403, {'message': 'Missing Access', 'code': 50001})
         said = self.refused(guild=GUILD, name='wimsyaogo_no')
         self.assertEqual(said, f'Discord answered 403 to POST /guilds/{GUILD}/emojis: Missing Access (code 50001)')
+
+    def test_the_invite_carries_attach_files_which_a_post_with_images_needs(self):
+        self.assertEqual(aw.ATTACH_FILES, 1 << 15)
+        self.assertEqual(aw.INVITE, 274878008384)
+        self.assertEqual(aw.INVITE & aw.ATTACH_FILES, aw.ATTACH_FILES)
 
     def test_only_the_four_names_each_from_its_own_png_and_no_path(self):
         for name in ('wimsyaogo', 'wimsyaogo_eyes.png', '../wimsyaogo_eyes', '/etc/passwd', ':wimsyaogo_eyes:', 5):
