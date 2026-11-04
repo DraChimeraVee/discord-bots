@@ -16,7 +16,7 @@ Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
 | `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through ten MCP tools: post (only once its owner approves the draft), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), upload the server's custom emojis it answers with, and list who its owner allowed. A slash command, `/aogo`: help for anyone, and its owner's allow for a time, deny and list. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, the listed users', those its owner allowed and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message | to Discord, the drafts (to its owner's DMs), the posts approved, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it, `/aogo` and its answers (seen by their asker alone); to the session, the messages it may read and the ones addressed to it |
-| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and eight of its tools, with Xuji's bot and settings, its reactions and quick replies the unicode emojis alone. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed (the session gets what a tool returns), no drawn emoji, and it greets no one and has no command |
+| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and eight of its tools, with Xuji's bot and settings, its reactions and quick replies the unicode emojis alone. It pushes what is addressed to Xuji, its owner's answers to its drafts and the gateway's news to the session's monitor, a line each, as Grok Build takes no push from an MCP server | as AogoWimsy | as AogoWimsy, but to the session's monitor (a local socket) in place of a claude/channel, no drawn emoji, and it greets no one and has no command |
 
 No bot keeps a message or logs what was said, and none pings anyone but AogoWimsy's greeting, which pings its owner.
 
@@ -190,23 +190,36 @@ strangers he lets through (his `:wimsyaogo:` too); nothing stored, and stderr ne
 emojis are Aogo's face, so `discord_react`, `discord_unreact` and `discord_quick` take the unicode eyes, check mark,
 thumbs up and cross alone, and it uploads none. It greets no one, takes no `GREET` key and has no command.
 
-It serves any client but Claude Code: an `initialize` from `claude-code` gets an error naming it and AogoWimsy. It
-offers no channel (Grok Build shows no push), so it says in its instructions how Discord reaches the session:
+It serves any client but Claude Code: an `initialize` from `claude-code` gets an error naming it and AogoWimsy. Grok
+Build takes no push from an MCP server into its model: a server's log messages and resource updates reach neither the
+model nor the screen, sampling is refused (-32601), and an elicitation is a card for the person at the terminal (Grok
+Build 1.0.70, measured on a scratch session). What wakes a Grok session is its own `monitor` tool: each line a command
+it runs prints comes in as a new turn. So XujiWimsy pushes to a monitor:
 
-- by waiting: `discord_wait` on a channel, after the id of the newest message the session has seen there
-  (`discord_read` gives it), and again after the `after` it returns. It brings the first message from the owner or a
-  listed user in that channel or thread; `discord_read` gives the rest, the strangers' messages the owner let through
-  among them. The owner's DMs with XujiWimsy are the channel of a draft's link.
-- with the next tool result: the gateway still posts a draft the moment its owner answers it, waited on or not, and
-  that answer (`The owner approved draft ...: posted as ...`, or refused), and the gateway's news (it stopped, cannot
-  be reached, is back), come after that result's own JSON, a text each opening `XujiWimsy news:`. It keeps the newest
-  20, and says how many older ones were left out.
+- Once the client is initialized, the server takes monitors on a Unix socket, `<XDG_RUNTIME_DIR or
+  ~/.local/state>/xujiwimsy/<client pid>.sock` (folder 700, socket 600), named for the Grok process that started it.
+  `xuji/xujiwimsy.py --listen` (it reads no env file) finds the socket of its own session's server among its parent
+  processes, and prints what it pushes, a line each.
+- Its instructions ask the session to start that monitor when it starts: the monitor tool, persistent, description
+  `XujiWimsy`, command `python3 /path/to/discord-bots/xuji/xujiwimsy.py --listen` (the path of the checkout it runs
+  from). A session told only to do what its MCP servers ask at its start did so, and an owner's mention woke it in 4 s.
+- A line is what AogoWimsy pushes into Claude Code, said in words: `message: DraVee (<id>) in channel <id>, message
+  <id>, replying to <id>, attachments a.png; b.log: "<the text, quoted>"`, `approved: ...` (a stranger's the owner let
+  through), `dm: ...` (a stranger's name only), `draft: The owner approved draft ...: posted as ...`, `error: ...`,
+  `notice: ...`. Grok shows its model the first 500 characters of a line, so a line is 500 bytes at most: a longer
+  text is cut, `..." (cut: discord_read gives it whole)`, and the session reads it whole.
+- With no monitor listening, a message to Xuji is heard by `discord_wait` on its channel alone (after the id of the
+  newest message the session has seen there, which `discord_read` gives), and the owner's answers to drafts and the
+  gateway's news come with the next tool result, after its own JSON, a text each opening `XujiWimsy news:` (the newest
+  20, the older ones counted). A draft is posted the moment its owner answers it, heard or not.
+- When the server stops (Grok quits or reconnects it), `--listen` says so in a last line naming the command to start
+  it again, and ends. A server killed leaves its socket; the next one to start takes away those of clients gone.
 
-A message addressed to Xuji in a channel nobody waits on is not heard until the session reads that channel.
-
-Grok Build 1.0.70 shows its model the first 2048 bytes of a server's instructions and cuts the rest. XujiWimsy's fit with
-three listed users and up to 13 channels; more ids than that are said on stderr and with the first tool result, naming
-the bytes, so a list can be cut short before its model misses how to answer.
+stderr says where each event went (`channel: a message event to 1 monitor`, or `no monitor listens`), never what it
+said. Grok Build 1.0.70 shows its model the first 2048 bytes of a server's instructions and cuts the rest. XujiWimsy's
+fit with three listed users and up to 7 channels (the checkout's path is in them); more ids than that are said on
+stderr and with the first tool result, naming the bytes, so a list can be cut short before its model misses how to
+answer.
 
 Its settings are AogoWimsy's first four keys (the table above), named `XUJIWIMSY_TOKEN`, `XUJIWIMSY_OWNER`,
 `XUJIWIMSY_USERS` and `XUJIWIMSY_CHANNELS`, with their defaults, meanings and checks, in
@@ -233,6 +246,8 @@ Setting it up, after its application (below):
    guide that came with 1.0.60 says 6000 s); a wait may take 3600 s (the most `wait` takes) and the calls to Discord
    around it, so the block sets 3900 and no wait the server takes outlasts it. With less, a longer wait ends in Grok's timeout instead of the
    tool's answer: a draft still waiting is then posted when the owner answers, and the next tool result says so.
+4. A session, in Grok Build: its server's instructions have it start the monitor; Grok's tasks pane (`Ctrl+G`) lists
+   `Monitor XujiWimsy` while it runs. Without it, ask the session to start the monitor its XujiWimsy instructions name.
 
 Grok Build also starts the MCP servers of `~/.claude.json` and of a `.mcp.json` from its folder up to the git root.
 A Grok session started where a `.mcp.json` names aogowimsy would start AogoWimsy, with Aogo's token: AogoWimsy refuses
@@ -264,7 +279,10 @@ token never shown), and its gateway client against a fake gateway on 127.0.0.1 (
 resume, the close codes that stop it, pings, messages in frames), and that lines from several threads never mix on
 stdout; XujiWimsy's env file and keys (the other bot's refused, and its example AogoWimsy's in its names), its server,
 instructions and tools in its own names (no drawn emoji: the unicode ones alone; its instructions within what Grok shows,
-and too many ids said),
+and too many ids said), its monitors (every event to each at once, a line each within what Grok shows, news only when
+none listens, the socket private, a stale one taken over, a live one's server named, those of clients gone taken away)
+and `--listen` (its own session's server found among its parents, lines as they come, a last line once it stops, none
+found said; the program itself as a monitor runs it),
 the client each Wimsy serves, the news a tool result carries, a post as it reaches Discord, and the program itself on
 stdin and stdout.
 

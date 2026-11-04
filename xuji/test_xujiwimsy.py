@@ -4,11 +4,14 @@ name, no claude/channel, its instructions, its tools in its names), the client e
 with no channel gets with its next tool result, a post as it reaches Discord, and the program on stdin and stdout.
 AogoWimsy's suite tests the code they share; its fake Discord serves here too."""
 
+import io
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -130,14 +133,19 @@ class Handshake(WithXuji):
         self.assertEqual(result['serverInfo']['name'], 'aogowimsy')
         self.assertEqual(result['capabilities'], {'tools': {}, 'experimental': {'claude/channel': {}}})
 
-    def test_its_instructions_say_who_it_is_whose_and_to_hear_through_discord_wait(self):
+    def test_its_instructions_say_who_it_is_whose_and_to_hear_through_a_monitor(self):
         said = aw.instructions(self.settings)
         self.assertTrue(
             said.startswith(f'XujiWimsy is Xuji on Discord. Every post is a draft its owner (Discord user {OWNER})')
         )
         self.assertIn(f"only the owner's messages, those of users {FRIEND} and its own reach you", said)
-        self.assertIn('to hear Discord, call discord_wait on a channel after the id of the newest message', said)
-        self.assertIn('the next tool result says it', said)
+        program = HERE / 'xujiwimsy.py'
+        self.assertIn(
+            "Discord reaches you through a monitor: at the session's start, run the monitor tool, persistent, "
+            f'description "XujiWimsy", command `python3 {program} --listen`; each line it prints is an event for you',
+            said,
+        )
+        self.assertIn('If it stops, start it again. Without it, discord_wait hears a channel, and the next tool', said)
         self.assertNotIn('<channel>', said)
         self.assertNotIn('Aogo', said)
         self.assertIn('<channel> events', aw.instructions(self.settings._replace(identity=aw.AOGO)))
@@ -310,7 +318,8 @@ class News(WithXuji):
         posted = self.fake.last(GENERAL)
         self.assertEqual(posted['content'], 'approved later')  # posted at once, no tool waiting
         self.assertNotIn(aw.CHANNEL_PUSH, [message.get('method') for message in self.sent])
-        self.assertIn('channel: a message event, not pushed: XujiWimsy offers no channel', self.logs)
+        self.assertIn('channel: a message event, no monitor listens', self.logs)
+        self.assertIn('channel: a draft event, no monitor listens: kept for the next tool result', self.logs)
         self.assertNotIn('channel: pushed a message event', self.logs)
         content = self.contents()
         self.assertEqual(json.loads(content[0]['text'])['channel'], GENERAL)
@@ -373,6 +382,252 @@ class News(WithXuji):
         self.assertEqual(texts[-1], "XujiWimsy news: XujiWimsy cannot reach Discord's gateway: try 25")
 
 
+def until(check, what, seconds=5.0):
+    """waits for another thread's work (a socket accepted, a line read), failing the test after seconds"""
+    end = time.monotonic() + seconds
+    while not check():
+        if time.monotonic() > end:
+            raise AssertionError(f'{what} did not happen in {seconds} s')
+        time.sleep(0.01)
+
+
+class Monitors(WithXuji):
+    """what its server pushes reaches the session's monitors, a line each, at once; with none, the news wait"""
+
+    def setUp(self):
+        super().setUp()
+        runtime = tempfile.TemporaryDirectory(prefix='xr-')  # short: a Unix socket's path has 107 bytes at most
+        self.addCleanup(runtime.cleanup)
+        self.runtime = Path(runtime.name)
+        self.stop = threading.Event()
+        self.addCleanup(self.stop.set)
+        self.relay = aw.Relay(self.runtime / 'xujiwimsy', os.getpid())  # its client: alive, as a server's is
+        self.threads = self.relay.start(self.stop, self.sent.append)
+        self.server = self.started_server(self.bot, relay=self.relay)
+        self.ear = aw.Ear(self.bot, self.server.push, threading.Event())
+        self.ear.hear('READY', {'user': {'id': BOT}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'})
+
+    def monitor(self):
+        """a monitor connected, as --listen connects: its lines as they come"""
+        count = len(self.relay.peers)
+        conn = socket.socket(socket.AF_UNIX)
+        conn.connect(str(self.relay.path))
+        self.addCleanup(conn.close)
+        until(lambda: len(self.relay.peers) > count, 'the relay taking the monitor')
+        conn.settimeout(5)
+        return conn.makefile('r', encoding='utf-8')
+
+    def test_its_socket_is_its_clients_private_to_the_user(self):
+        self.assertEqual(self.relay.path, self.runtime / 'xujiwimsy' / f'{os.getpid()}.sock')
+        self.assertEqual(oct(self.relay.path.stat().st_mode & 0o777), '0o600')
+        self.assertEqual(oct(self.relay.path.parent.stat().st_mode & 0o777), '0o700')
+        self.assertIn(f'monitors: listening at {self.relay.path}', self.logs)
+        self.assertEqual(
+            aw.runtime_folder('xujiwimsy', {'XDG_RUNTIME_DIR': '/run/user/7'}), Path('/run/user/7/xujiwimsy')
+        )
+        self.assertEqual(aw.runtime_folder('xujiwimsy', {}), Path.home() / '.local/state/xujiwimsy')
+        relay = aw.relay_for(aw.XUJI, 31, {'XDG_RUNTIME_DIR': '/run/user/7'})
+        self.assertEqual(relay.path, Path('/run/user/7/xujiwimsy/31.sock'))
+        self.assertIsNone(aw.relay_for(aw.AOGO, 31))  # a claude/channel pushes into its session
+
+    def test_each_event_reaches_every_monitor_at_once_and_waits_as_news_only_when_none_listens(self):
+        first, second = self.monitor(), self.monitor()
+        number = self.fake.say(GENERAL, OWNER, 'to xuji, two\nlines', mentions=[BOT])
+        self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        line = f'message: DraVee ({OWNER}) in channel {GENERAL}, message {number}: "to xuji, two\\nlines"\n'
+        self.assertEqual((first.readline(), second.readline()), (line, line))
+        self.assertIn('channel: a message event to 2 monitors', self.logs)
+        draft = self.tool('discord_post', channel=GENERAL, text='approved later', wait=0)['draft']
+        self.fake.react(draft, YES, OWNER)
+        event = {'user_id': OWNER, 'channel_id': DM, 'message_id': draft, 'emoji': {'id': None, 'name': YES}}
+        self.ear.hear('MESSAGE_REACTION_ADD', event)
+        link = f'https://discord.com/channels/{GUILD}/{GENERAL}/{self.fake.last(GENERAL)["id"]}'
+        self.assertEqual(first.readline(), f'draft: The owner approved draft {draft}: posted as {link}\n')
+        self.assertEqual(second.readline(), f'draft: The owner approved draft {draft}: posted as {link}\n')
+        self.assertEqual(len(self.answer('discord_read', channel=GENERAL)['result']['content']), 1)  # no news: heard
+        first.close()
+        second.close()
+        for peer in list(self.relay.peers):
+            peer.shutdown(socket.SHUT_RDWR)  # as a monitor Grok stopped: its next line fails and it is dropped
+        self.ear.report('trouble', 'OSError: down; it tries again, 60 s apart at most')
+        self.assertEqual(self.relay.peers, [])
+        content = self.answer('discord_read', channel=GENERAL)['result']['content']
+        self.assertEqual(
+            content[1]['text'],
+            "XujiWimsy news: XujiWimsy cannot reach Discord's gateway: OSError: down; it tries again, 60 s apart at "
+            'most',
+        )
+        self.assertIn('channel: a error event, no monitor listens: kept for the next tool result', self.logs)
+
+    def test_a_strangers_call_the_owner_let_through_and_a_strangers_dm_reach_it_as_aogowimsys_channel(self):
+        lines = self.monitor()
+        number = self.fake.say(GENERAL, STRANGER, 'hey xuji', mentions=[BOT])
+        self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))  # a stranger's: nothing yet
+        self.ear.hear(
+            'MESSAGE_CREATE', self.fake.event(base.STRANGER_DM, self.fake.say(base.STRANGER_DM, STRANGER, 'psst'))
+        )
+        self.assertEqual(
+            lines.readline(),
+            f'dm: Stranger ({STRANGER}) wrote to XujiWimsy in DMs; nothing of what they wrote reaches the session\n',
+        )
+        self.fake.react(number, base.WIMSY, OWNER)
+        name, _, emoji_id = base.WIMSY.partition(':')
+        event = {'user_id': OWNER, 'channel_id': GENERAL, 'message_id': number, 'guild_id': GUILD}
+        self.ear.hear('MESSAGE_REACTION_ADD', dict(event, emoji={'id': emoji_id, 'name': name}))
+        self.assertEqual(
+            lines.readline(), f'approved: Stranger ({STRANGER}) in channel {GENERAL}, message {number}: "hey xuji"\n'
+        )
+
+    def test_the_other_wimsy_listed_reaches_it_by_naming_it_in_its_text(self):
+        # as AogoWimsy hands a session's work over: its post pings no one, so Discord gives it no mentions
+        self.bot.settings = self.bot.settings._replace(users=self.bot.settings.users | {base.OTHER_BOT})
+        lines = self.monitor()
+        number = self.fake.say(GENERAL, base.OTHER_BOT, f'<@{BOT}> triage the open PRs, please')
+        self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        said = f'"<@{BOT}> triage the open PRs, please"'
+        self.assertEqual(
+            lines.readline(), f'message: ReiWimsy ({base.OTHER_BOT}) in channel {GENERAL}, message {number}: {said}\n'
+        )
+
+    def test_a_line_fits_what_the_monitor_shows_its_text_cut_short_and_said(self):
+        meta = {'kind': 'message', 'author': 'DraVee', 'author_id': OWNER, 'channel': GENERAL, 'message_id': HELP}
+        meta.update(reply_to=OTHER, attachments='build.log; shot.png')
+        text = 'olá, tudo bem? ' * 200 + 'THE END'
+        line = aw.event_line(text, meta)
+        self.assertLessEqual(len(line.encode()), aw.MONITOR_SHOWS)
+        self.assertGreater(len(line.encode()), aw.MONITOR_SHOWS - 8)  # as much of the text as fits
+        head = (
+            f'message: DraVee ({OWNER}) in channel {GENERAL}, message {HELP}, replying to {OTHER}, attachments '
+            'build.log; shot.png: "olá, tudo bem? '
+        )
+        self.assertTrue(line.startswith(head), line)
+        self.assertTrue(line.endswith('..." (cut: discord_read gives it whole)'), line)
+        self.assertNotIn('\n', line)
+        short = aw.event_line('two\nlines "quoted"', meta)
+        self.assertTrue(short.endswith(': "two\\nlines \\"quoted\\""'), short)
+        said = aw.event_line('XujiWimsy stopped hearing Discord:\nwhy ' + 'x' * 600, {'kind': 'error'})
+        self.assertTrue(said.startswith('error: XujiWimsy stopped hearing Discord: why xxx'), said)
+        self.assertTrue(said.endswith('... (cut)'), said)
+        self.assertLessEqual(len(said.encode()), aw.MONITOR_SHOWS)
+        names = aw.event_line('hi', dict(meta, attachments='a' * 900))  # a head over the limit is cut too
+        self.assertLessEqual(len(names.encode()), aw.MONITOR_SHOWS)
+
+    def test_a_stale_socket_is_taken_over_and_a_live_ones_server_named(self):
+        again = aw.Relay(self.relay.path.parent, os.getpid())
+        with self.assertRaisesRegex(
+            OSError, f'another server listens there, for the same client: .*{os.getpid()}.sock'
+        ):
+            again.open()
+        self.assertTrue(self.relay.path.exists())
+        stale = self.runtime / 'xujiwimsy' / '77.sock'
+        left = socket.socket(socket.AF_UNIX)
+        left.bind(str(stale))
+        left.close()  # a server killed before it took its socket away
+        relay = aw.Relay(stale.parent, 77)
+        relay.open()
+        self.addCleanup(relay.close)
+        probe = socket.socket(socket.AF_UNIX)
+        probe.connect(str(stale))
+        probe.close()
+
+    def test_the_sockets_of_clients_gone_are_taken_away_and_the_others_left(self):
+        folder = self.runtime / 'xujiwimsy'
+        gone, live = folder / '999999999.sock', folder / f'{os.getppid()}.sock'
+        for path in (gone, live):
+            left = socket.socket(socket.AF_UNIX)
+            left.bind(str(path))
+            left.close()
+        (folder / '999999998.sock').mkdir()  # not a socket: left as it is
+        relay = aw.Relay(folder, 4343)
+        relay.open()
+        self.addCleanup(relay.close)
+        self.assertEqual(
+            sorted(p.name for p in folder.iterdir()),
+            sorted([self.relay.path.name, '4343.sock', live.name, '999999998.sock']),
+        )
+        self.assertIn(f'monitors: took away {gone}, its client 999999999 gone', self.logs)
+        self.assertTrue(aw.alive(os.getpid()))
+        self.assertFalse(aw.alive(999999999))
+
+    def test_a_socket_it_cannot_open_is_said_and_waits_as_news(self):
+        pushed = []
+        long = aw.Relay(self.runtime / ('x' * 120), 4242)  # past a socket path's 107 bytes
+        self.assertEqual(long.start(self.stop, lambda text, meta: pushed.append((text, meta))), [])
+        self.assertEqual(len(pushed), 1)
+        text, meta = pushed[0]
+        self.assertEqual(meta, {'kind': 'error'})
+        self.assertRegex(text, r'^it cannot open .*/4242.sock for its monitors: .+; discord_wait still hears$')
+        self.assertIn(f'monitors: {text}', self.logs)
+
+    def test_a_monitor_stopping_the_server_closes_its_socket(self):
+        self.stop.set()
+        for thread in self.threads:
+            thread.join(5)
+        self.assertFalse(self.relay.path.exists())
+
+
+class Listener(unittest.TestCase):
+    """--listen's side: the server of its own session, found among its parents, each line as it comes"""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory(prefix='xl-')
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.proc = self.root / 'proc'  # a process tree: 300 (the monitor's shell) under 200 (the client) under 1
+        for pid, parent in ((300, 200), (200, 1)):
+            (self.proc / str(pid)).mkdir(parents=True)
+            (self.proc / str(pid) / 'stat').write_text(f'{pid} (a (strange) name) S {parent} {pid} 0 0 -1\n')
+        self.environ = {'XDG_RUNTIME_DIR': str(self.root)}
+        self.out = io.StringIO()
+
+    def listen(self):
+        return aw.listen_to(aw.XUJI, self.out, self.environ, self.proc, parent=300)
+
+    def test_its_parents_come_from_proc(self):
+        self.assertEqual(aw.ancestors(300, self.proc), [300, 200])
+
+    def test_it_prints_its_sessions_server_lines_and_says_when_it_stopped(self):
+        stop = threading.Event()
+        relay = aw.Relay(self.root / 'xujiwimsy', 200)
+        relay.start(stop, None)
+        got = []
+        thread = threading.Thread(target=lambda: got.append(self.listen()))
+        thread.start()
+        until(lambda: relay.peers, 'the listener connecting')
+        self.assertEqual(relay.send('message: one'), 1)
+        self.assertEqual(relay.send('draft: two'), 1)
+        until(lambda: self.out.getvalue().count('\n') == 2, 'the two lines printed')
+        stop.set()
+        thread.join(5)
+        lines = self.out.getvalue().splitlines()
+        self.assertEqual(lines[:2], ['message: one', 'draft: two'])
+        self.assertEqual(
+            lines[2],
+            'XujiWimsy: its server for this session stopped; once it is up again, start this monitor again: '
+            + aw.listen_command(aw.XUJI),
+        )
+        self.assertEqual(got, [1])
+
+    def test_with_no_server_or_a_stopped_ones_socket_it_says_where_it_looked(self):
+        (self.root / 'xujiwimsy').mkdir()
+        left = socket.socket(socket.AF_UNIX)
+        left.bind(str(self.root / 'xujiwimsy' / '200.sock'))
+        left.close()
+        self.assertEqual(self.listen(), 1)
+        self.assertEqual(
+            self.out.getvalue(),
+            f'XujiWimsy: no XujiWimsy server listens for this session (none of {self.root}/xujiwimsy/<pid>.sock for '
+            'its parents 300, 200): is xujiwimsy one of its MCP servers, and connected?\n',
+        )
+
+    def test_without_proc_it_says_it_cannot_find_its_server(self):
+        self.assertEqual(aw.listen_to(aw.XUJI, self.out, self.environ, self.root / 'nowhere', parent=300), 1)
+        self.assertRegex(
+            self.out.getvalue(),
+            r'^XujiWimsy: this monitor cannot see its parents \(.+\), so it cannot find its server\n$',
+        )
+
+
 class GatewayNames(WithXuji):
     def test_the_gateway_identifies_as_xujiwimsy_and_names_its_token(self):
         stop, reports = threading.Event(), []
@@ -404,7 +659,7 @@ class Stdio(unittest.TestCase):
         result = answer['result']
         self.assertEqual(result['serverInfo']['name'], 'xujiwimsy')
         self.assertEqual(result['capabilities'], {'tools': {}})
-        self.assertIn('call discord_wait', result['instructions'])
+        self.assertIn('--listen`; each line it prints is an event for you', result['instructions'])
         self.assertIn(f'channels {GENERAL}, {HELP} and their threads', result['instructions'])
         answer = self.exchange(proc, {'jsonrpc': '2.0', 'id': 'list', 'method': 'tools/list'})
         self.assertEqual(answer['result'], {'tools': aw.tool_list(aw.XUJI)})
@@ -430,6 +685,28 @@ class Stdio(unittest.TestCase):
         self.assertRegex(news, r"^XujiWimsy news: XujiWimsy's instructions are [0-9]+ bytes and Grok Build shows")
         self.assertIn('List fewer ids in XUJIWIMSY_USERS or XUJIWIMSY_CHANNELS', news)
         self.assertIn(news.removeprefix('XujiWimsy news: '), self.finish(proc))
+
+    def test_listen_prints_what_its_sessions_server_pushes_and_exits_once_it_stops(self):
+        runtime = tempfile.TemporaryDirectory(prefix='xs-')
+        self.addCleanup(runtime.cleanup)
+        stop = threading.Event()
+        relay = aw.Relay(Path(runtime.name) / 'xujiwimsy', os.getpid())  # this test is the client it runs under
+        relay.start(stop, None)
+        self.addCleanup(stop.set)
+        proc = self.start('--listen', environ=dict(os.environ, XDG_RUNTIME_DIR=runtime.name))
+        until(lambda: relay.peers, 'xujiwimsy.py --listen connecting')
+        relay.send('message: DraVee (1) in channel 2, message 3: "hi"')
+        self.assertEqual(proc.stdout.readline(), b'message: DraVee (1) in channel 2, message 3: "hi"\n')
+        stop.set()
+        self.assertEqual(proc.wait(5), 1)
+        self.assertTrue(proc.stdout.read().decode().startswith('XujiWimsy: its server for this session stopped;'))
+        self.assertEqual(proc.stderr.read(), b'')
+        aogo = self.start('--listen', program=HERE.parent / 'aogo' / 'aogowimsy.py')
+        self.assertEqual(aogo.wait(5), 1)
+        self.assertIn(
+            b'aogowimsy: --listen is for a client with no channel; AogoWimsy pushes into Claude Code',
+            aogo.stderr.read(),
+        )
 
     def test_claude_code_is_refused_and_stderr_says_so(self):
         proc = self.start('--env', self.env)
