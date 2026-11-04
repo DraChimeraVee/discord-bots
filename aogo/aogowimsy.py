@@ -20,11 +20,13 @@ the other one's bot. Its tools:
     discord_wait         the first message after an id from the owner, a listed user or an allowed one, as the
                          gateway hears it
     discord_attachments  a message's attachments saved to a folder of its own, for a message discord_read gives
-    discord_react        the bot's reaction on a message discord_read gives, at once and with no draft: one of the
-                         fixed REACTIONS alone (seen, done, agreed, cannot, the owner's emoji), so no text goes out
+    discord_react        the bot's reaction on a message discord_read gives, at once and with no draft: one of its
+                         identity's few alone (Identity.reactions: seen, done, agreed, cannot, and AogoWimsy's the
+                         owner's emoji), so no text goes out
     discord_unreact      takes one of those reactions of the bot's off a message
-    discord_quick        a reply that is one emoji of QUICK alone, posted at once and with no draft: no text
+    discord_quick        a reply that is one emoji of Identity.quick alone, posted at once and with no draft: no text
     discord_emoji_upload uploads one of the server's DRAWN emojis from its fixed file in EMOJI_FOLDER, by its name
+                         (AogoWimsy alone: XujiWimsy answers with the unicode emojis)
     discord_allowed      who the owner allowed with /aogo allow, and until when (AogoWimsy alone)
 
 AogoWimsy is also a Claude Code channel (experimental capability claude/channel): once the session is up it stays on
@@ -58,7 +60,7 @@ session. XujiWimsy has no command.
 Discord's REST API v10 (urllib) reads and posts; its gateway (a WebSocket of its own, ssl and socket) hears. It works
 in the channels <PREFIX>_CHANNELS lists and their threads, or in every one Discord lets it see when it lists none,
 and in the owner's DMs with it. The owner's check mark is the only way a session's text gets out: no setting turns it
-off. A reaction or a quick reply carries no text, so it goes at once, and only one of REACTIONS (QUICK for a reply);
+off. A reaction or a quick reply carries no text, so it goes at once, and only one of its identity's few emojis;
 the greeting and an answer to /aogo are the server's fixed lines, never the session's. Nothing is stored but the
 attachments discord_attachments is asked for, in <XDG_CACHE_HOME or ~/.cache>/<server>/<channel>/<message>/ (folders
 700, files 600), and the bot's state in <XDG_STATE_HOME or ~/.local/state>/<server>/ (Store; folder 700, files 600,
@@ -110,6 +112,7 @@ class Identity(NamedTuple):
     claude: bool  # True: Claude Code alone, as a claude/channel; False: any client but Claude Code, with no push
     greeting: str | None = None  # the line a stranger who calls the bot gets at once, {owner} his id; None: none
     command: str | None = None  # its slash command's name (COMMANDS), registered in each server it is in; None: none
+    drawn: tuple = ()  # its custom emojis, one for each of MEANINGS (EMOJI_FOLDER/<name>.png); (): unicode alone
 
     def key(self, name):
         return f'{self.prefix}_{name}'
@@ -126,6 +129,27 @@ class Identity(NamedTuple):
     @property
     def keys(self):
         return (*self.needed, self.key('CHANNELS'), *self.greet_keys)
+
+    @property
+    def says(self):
+        """(its custom emoji as :name:, or None; the unicode one; what they say), for each of MEANINGS"""
+        names = [f':{name}:' for name in self.drawn] or [None] * len(MEANINGS)
+        return tuple((name, plain, meaning) for name, (plain, meaning) in zip(names, MEANINGS, strict=True))
+
+    @property
+    def same(self):
+        """each custom emoji's unicode one, which an error names while the custom one is not uploaded"""
+        return {name: plain for name, plain, _ in self.says if name}
+
+    @property
+    def quick(self):
+        """what discord_quick posts alone: the custom emojis, then the unicode ones"""
+        return (*self.same, *(plain for plain, _ in MEANINGS))
+
+    @property
+    def reactions(self):
+        """what discord_react puts: the quick ones, and for a bot drawn as Aogo the owner's WIMSY, named for Aogo"""
+        return (*self.quick, f':{WIMSY}:') if self.drawn else self.quick
 
 
 # What a stranger who calls the bot gets at once, with no draft and no owner's check mark (DraVee, 2026-11-02:
@@ -172,6 +196,19 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
     'allowed': 'no allow is read',
     'interactions': 'no command is answered',
 }
+YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
+# The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
+# emoji"): his reaction with it, and only his, lets one stranger's message addressed to the bot reach the session.
+# Matched by its name; a constant, not a setting.
+WIMSY = 'wimsyaogo'
+# What the bot answers with, at once and with no draft (DraVee, 2026-11-02: "implementa reacoes, assim vc meio q
+# pode responder mais rapidamente"; of the drawn ones: "vc pode ate usar como mensagem rapida tambem"): a reaction
+# or a reply of one emoji alone skips the owner's check mark, so only these, which carry no text. Each unicode one
+# and what it says; a bot drawn for them (Identity.drawn) answers with its server's custom emoji first.
+MEANINGS = ((EYES, 'seen, on it'), (YES, 'done'), (THUMBS, 'agreed'), (NO, 'cannot'))
+# Aogo's drawings of MEANINGS, in that order (wimsy-dist's emoji/, each matched by its name). Xuji has none: its
+# answers are the unicode ones alone, never Aogo's face
+DRAWN = ('wimsyaogo_eyes', 'wimsyaogo_done', 'wimsyaogo_thumbsup', 'wimsyaogo_no')
 AOGO = Identity(
     'aogowimsy',
     'AogoWimsy',
@@ -181,6 +218,7 @@ AOGO = Identity(
     claude=True,
     greeting=GREETING,
     command='aogo',
+    drawn=DRAWN,
 )
 XUJI = Identity('xujiwimsy', 'XujiWimsy', 'Xuji', 'XUJIWIMSY', '~/.config/xujiwimsy/xujiwimsy.env', claude=False)
 IDENTITIES = (AOGO, XUJI)
@@ -197,25 +235,6 @@ MOST_WAIT = 3600  # seconds a tool waits at most
 PAGE = 100  # messages one GET gives at most
 TRIES = 5  # a request answered 429 this many times in a row is an error
 MOST_RETRY = 60.0  # seconds a 429 may ask to wait
-YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
-# The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
-# emoji"): his reaction with it, and only his, lets one stranger's message addressed to the bot reach the session.
-# Matched by its name; a constant, not a setting.
-WIMSY = 'wimsyaogo'
-# What the bot answers with, at once and with no draft (DraVee, 2026-11-02: "implementa reacoes, assim vc meio q
-# pode responder mais rapidamente"; of the drawn ones: "vc pode ate usar como mensagem rapida tambem"): a reaction
-# or a reply of one emoji alone skips the owner's check mark, so only these, which carry no text. Each the server's
-# custom emoji drawn for it (wimsy-dist's emoji/, matched by its name), then the unicode one that says the same.
-SAYS = (
-    ('wimsyaogo_eyes', EYES, 'seen, on it'),
-    ('wimsyaogo_done', YES, 'done'),
-    ('wimsyaogo_thumbsup', THUMBS, 'agreed'),
-    ('wimsyaogo_no', NO, 'cannot'),
-)
-DRAWN = tuple(name for name, _, _ in SAYS)  # the custom ones discord_emoji_upload uploads
-SAME = {f':{name}:': plain for name, plain, _ in SAYS}  # the unicode one a custom one not uploaded yet names
-QUICK = tuple(SAME) + tuple(SAME.values())  # what discord_quick posts alone
-REACTIONS = (*QUICK, f':{WIMSY}:')  # what discord_react puts. Constants, not settings
 EMOJI_FOLDER = '~/WorkDir/ScarletNX/wimsy-dist/emoji'  # the owner's clone of wimsy-dist: <name>.png of each of DRAWN
 MOST_EMOJI = 256 << 10  # bytes of an emoji's image Discord takes at most
 CREATE_EXPRESSIONS = 1 << 43  # the permission POST /guilds/{guild}/emojis needs
@@ -231,6 +250,9 @@ SENT = re.compile(r'sent: ([0-9]{17,20}|@me)/([0-9]{17,20})/([0-9]{17,20})')
 VERSIONS = ('2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05')  # the initialize handshake's
 METHODS = ('initialize', 'ping', 'tools/list', 'tools/call')
 CHANNEL_PUSH = 'notifications/claude/channel'
+# Grok Build 1.0.70 shows its model a server's instructions up to 2048 bytes of UTF-8: of a longer text, the first
+# 2033 bytes and "… [truncated]" (measured 2026-11-04 with instructions of 3645 letters). XujiWimsy's stay within it
+GROK_SHOWS = 2048
 NEWS = ('error', 'notice', 'draft')  # the pushes a client with no channel gets with its next tool result
 MOST_NEWS = 20  # news kept for it at most: the oldest go first, counted
 # The gateway's intents: GUILDS (1), GUILD_MESSAGES (512), GUILD_MESSAGE_REACTIONS (1024), DIRECT_MESSAGES (4096),
@@ -394,9 +416,16 @@ def scope(settings):
     return f'channels {by_id(settings.channels)} and their threads'
 
 
-def reactions_text():
-    """SAYS in words: each custom emoji, the unicode one that says the same, and what they say"""
-    return '; '.join(f':{name}: or {plain} ({meaning})' for name, plain, meaning in SAYS)
+def reactions_text(identity):
+    """the identity's reactions in words: each custom emoji, the unicode one that says the same, and what they say"""
+    return '; '.join(
+        f'{name} or {plain} ({meaning})' if name else f'{plain} ({meaning})' for name, plain, meaning in identity.says
+    )
+
+
+def seen_and_done(identity):
+    """the reactions that say seen and done: the custom ones of a bot drawn for them, else the unicode ones"""
+    return tuple(name or plain for name, plain, _ in identity.says[:2])
 
 
 def greeting_text(settings):
@@ -448,13 +477,7 @@ def instructions(settings):
         f'his :{WIMSY}: reaction on, or any he replied to while mentioning {me}. '
         + greeting_text(settings)
         + command_text(settings)
-        + 'To say you saw a message or finished what it asked, react to it with discord_react instead of posting, the '
-        f"server's emoji first, its unicode one only while that is not uploaded: {reactions_text()}; and :{WIMSY}:, "
-        "the owner's emoji. A reaction goes out at once, with no draft, and only these; put :wimsyaogo_eyes: when "
-        'you start on a message and, once done, take it off with discord_unreact and put :wimsyaogo_done:. '
-        f"{me}'s own :{WIMSY}: lets nothing through: only the owner's does. To answer a message with one of those "
-        'emojis alone, a quick reply, use discord_quick: it posts at once, with no draft, and takes no text; a text '
-        f"goes through discord_post and the owner's {YES}. "
+        + reacting_text(settings.identity)
     )
     if settings.identity.claude:
         return said + (
@@ -467,20 +490,57 @@ def instructions(settings):
             'at once: draft, status, channel, and message_id once posted), kind="error" or "notice" (the gateway'
             + ('; an allow or a deny' if allowed else '')
             + '). '
-            f"Answer in Discord with discord_post, reply_to the message_id: it still waits for the owner's {YES}. "
-            "A message's attachments (an event's attachments, or quoted_attachments of the message in reply_to) are "
-            'yours to open with discord_attachments, which saves them and gives their paths.'
+            + ANSWERING
         )
     return said + (
         'Nothing reaches you on its own: to hear Discord, call discord_wait on a channel after the id of the newest '
-        'message you have seen there (discord_read gives it), and again after the "after" it returns; it brings the '
-        "first message from the owner or a listed user, and discord_read the rest, the strangers' messages the owner "
-        f"let through among them. The owner's DMs with {me} are the channel of a draft's link. A draft he answers is "
-        'posted or refused at once, waited on or not, and what the gateway reports (stopped, cannot be reached, back) '
-        'comes the same way: the next tool result says it, after its own JSON. Answer in Discord with discord_post, '
-        f"reply_to the message's id: it still waits for the owner's {YES}. A message's attachments (its "
-        '"attachments", or those of the message in reply_to) are yours to open with discord_attachments, which saves '
-        'them and gives their paths.'
+        'message you have seen there (discord_read gives it), and again after the "after" it returns. The owner\'s '
+        f"DMs with {me} are the channel of a draft's link. His answer to a draft posts or refuses it at once, and the "
+        "next tool result says it, after its own JSON, as it says the gateway's news (stopped, cannot be reached, "
+        'back). ' + ANSWERING
+    )
+
+
+# How either Wimsy's session answers, whichever way Discord reached it
+ANSWERING = (
+    f"Answer in Discord with discord_post, reply_to the message's id: it still waits for the owner's {YES}. A "
+    'message\'s attachments (its "attachments", or "quoted_attachments" of the message it replies to) are yours to '
+    'open with discord_attachments, which saves them and gives their paths.'
+)
+
+
+def cut_by_grok(settings, text):
+    """why a client that is not Claude Code loses the end of these instructions, or None: Grok Build shows its model
+    the first GROK_SHOWS bytes of them"""
+    size, identity = len(text.encode()), settings.identity
+    if identity.claude or size <= GROK_SHOWS:
+        return None
+    ids = sum(len(each) + 2 for each in settings.users | (settings.channels or frozenset()))
+    return (
+        f"{identity.title}'s instructions are {size} bytes and Grok Build shows its model the first {GROK_SHOWS}: "
+        f'the end of them (how to answer, attachments) is lost. List fewer ids in {identity.key("USERS")} or '
+        f'{identity.key("CHANNELS")}, which take {ids} bytes of them'
+    )
+
+
+def reacting_text(identity):
+    """the reactions and quick replies in words, for the session: which, and when"""
+    me, (seen, done) = identity.title, seen_and_done(identity)
+    if not identity.drawn:  # XujiWimsy's, kept short: Grok Build shows its model the first GROK_SHOWS bytes
+        return (
+            f'To say you saw a message or did what it asked, react to it with discord_react rather than post: '
+            f'{reactions_text(identity)}; {seen} when you start, then discord_unreact it and put {done} when done. A '
+            'reaction goes out at once, with no draft, and only these; so does discord_quick, a reply of one of them '
+            f"alone, which takes no text: a text goes through discord_post and the owner's {YES}. "
+        )
+    return (
+        'To say you saw a message or finished what it asked, react to it with discord_react instead of posting, the '
+        f"server's emoji first, its unicode one only while that is not uploaded: {reactions_text(identity)}; and "
+        f":{WIMSY}:, the owner's emoji. A reaction goes out at once, with no draft, and only these; put {seen} when "
+        f"you start on a message and, once done, take it off with discord_unreact and put {done}. {me}'s own "
+        f":{WIMSY}: lets nothing through: only the owner's does. To answer a message with one of those emojis alone, "
+        'a quick reply, use discord_quick: it posts at once, with no draft, and takes no text; a text goes through '
+        f"discord_post and the owner's {YES}. "
     )
 
 
@@ -1518,7 +1578,7 @@ class Wimsy:
         take(args, tool, ('channel', 'message', 'emoji'), ())
         channel = snowflake(args['channel'], 'channel')
         number = snowflake(args['message'], 'message')
-        emoji = one_of(args['emoji'], REACTIONS, f'not one {self.title} reacts with')
+        emoji = one_of(args['emoji'], self.settings.identity.reactions, f'not one {self.title} reacts with')
         where, message = self.aimed(tool, channel, number, reading=True)
         return channel, where.get('guild_id'), message, emoji
 
@@ -1559,7 +1619,7 @@ class Wimsy:
         reply_to = snowflake(args['reply_to'], 'reply_to')
         emoji = one_of(
             args['emoji'],
-            QUICK,
+            self.settings.identity.quick,
             f"not one {self.title} posts alone; a text goes through discord_post and the owner's {YES}",
         )
         where, _ = self.aimed('discord_quick', channel, reply_to, reading=False)
@@ -1807,9 +1867,10 @@ class Wimsy:
         take(args, 'discord_emoji_upload', ('guild', 'name'), ())
         guild = snowflake(args['guild'], 'guild')
         name = args['name']
-        if name not in DRAWN:
+        drawn = self.settings.identity.drawn
+        if name not in drawn:
             raise Refused(
-                f'name is {shown(name)}, not one {self.title} uploads: it takes {", ".join(DRAWN)}, each from '
+                f'name is {shown(name)}, not one {self.title} uploads: it takes {", ".join(drawn)}, each from '
                 f'{self.drawings}/<name>.png'
             )
         there = self.emoji_id(guild, name, fresh=True)
@@ -1872,8 +1933,9 @@ class Wimsy:
                 return f'{name}:{found}'
         missing = f'no server {self.title} is in has an emoji named {name} (it looked in '
         missing += f'{by_id(looked) if looked else "none: it is in no server"})'
-        if emoji in SAME:
-            missing += f': it is not uploaded yet (discord_emoji_upload uploads it); {SAME[emoji]} says the same'
+        same = self.settings.identity.same
+        if emoji in same:
+            missing += f': it is not uploaded yet (discord_emoji_upload uploads it); {same[emoji]} says the same'
         raise Refused(missing)
 
     def wait_for(self, args, cancelled, progress):
@@ -2494,14 +2556,14 @@ TOOL_NAMES = (
 )
 
 
-def reacting_schema(emoji):
+def reacting_schema(identity, emoji):
     """discord_react's and discord_unreact's arguments"""
     return {
         'type': 'object',
         'properties': {
             'channel': dict(ID, description='the channel, thread or DM id the message is in'),
             'message': dict(ID, description='the message id'),
-            'emoji': {'type': 'string', 'enum': list(REACTIONS), 'description': emoji},
+            'emoji': {'type': 'string', 'enum': list(identity.reactions), 'description': emoji},
         },
         'required': ['channel', 'message', 'emoji'],
         'additionalProperties': False,
@@ -2530,7 +2592,37 @@ def tool_list(identity):
         ),
         'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False},
     }
-    return [
+    upload = {
+        'name': 'discord_emoji_upload',
+        'description': (
+            f'Upload to a server one of the custom emojis {me} answers with, from its fixed file: name is one of '
+            f'{", ".join(identity.drawn)}, the file {EMOJI_FOLDER}/<name>.png, uploaded as <name>. No other name or '
+            'file. One the server has by that name already is not uploaded again. It needs the Create Expressions '
+            f"permission there: without it, the error says so and the invite's permissions with it. Returns JSON "
+            '{"status": "uploaded", or "already there" when it was, "guild", "name", "id"}.'
+        ),
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'guild': dict(ID, description='the server id to upload to'),
+                'name': {'type': 'string', 'enum': list(identity.drawn), 'description': 'the emoji, and its file'},
+            },
+            'required': ['guild', 'name'],
+            'additionalProperties': False,
+        },
+    }
+    seen, done = seen_and_done(identity)
+    if identity.drawn:
+        first = ' The custom one first: its unicode one only while the server has not got it (that error names it).'
+        taken = f"{reactions_text(identity)}; and :{WIMSY}:, the owner's emoji.{first[:-1]}"
+        custom, own = (
+            " A custom one is the server's emoji of its name.",
+            f" {me}'s own :{WIMSY}: lets nothing through: only the owner's does.",
+        )
+    else:
+        first = custom = own = ''
+        taken = reactions_text(identity)
+    tools = [
         {
             'name': 'discord_post',
             'description': (
@@ -2660,16 +2752,13 @@ def tool_list(identity):
             'name': 'discord_react',
             'description': (
                 f"Put a reaction of {me}'s on a message, at once: no draft and no owner's {YES}, so it takes only "
-                f"these: {reactions_text()}; and :{WIMSY}:, the owner's emoji. The custom one first: its unicode one "
-                'only while the server has not got it (that error names it). Use one instead of a post to say you '
-                'saw a message or finished it: :wimsyaogo_eyes: when you start on it, then discord_unreact it and '
-                ":wimsyaogo_done: when done. A custom one is the server's emoji of its name. The message is one "
-                f"discord_read gives (the owner's, a listed user's, {me}'s own, or a stranger's the owner let "
-                f"through), never a draft. {me}'s own :{WIMSY}: lets nothing through: only the owner's does. Returns "
-                'JSON {"status": "reacted", or "already there" when it was, "channel", "message", "emoji"}. Another '
-                'emoji is an error naming it and these. ' + where
+                f'these: {taken}. Use one instead of a post to say you saw a message or finished it: {seen} when you '
+                f'start on it, then discord_unreact it and {done} when done.{custom} The message is one discord_read '
+                f"gives (the owner's, a listed user's, {me}'s own, or a stranger's the owner let through), never a "
+                f'draft.{own} Returns JSON {{"status": "reacted", or "already there" when it was, "channel", '
+                '"message", "emoji"}. Another emoji is an error naming it and these. ' + where
             ),
-            'inputSchema': reacting_schema('the emoji to put'),
+            'inputSchema': reacting_schema(identity, 'the emoji to put'),
         },
         {
             'name': 'discord_unreact',
@@ -2678,14 +2767,14 @@ def tool_list(identity):
                 'Returns JSON {"status": "removed", or "not there" when it was not, "channel", "message", "emoji"}. '
                 + where
             ),
-            'inputSchema': reacting_schema('the emoji to take off'),
+            'inputSchema': reacting_schema(identity, 'the emoji to take off'),
         },
         {
             'name': 'discord_quick',
             'description': (
                 f"Answer a message with one emoji alone, a quick reply, posted at once: no draft and no owner's "
-                f'{YES}, so it takes no text and only these: {reactions_text()}. The custom one first: its unicode '
-                'one only while the server has not got it (that error names it). A text goes through discord_post. '
+                f'{YES}, so it takes no text and only these: {reactions_text(identity)}.{first} A text goes through '
+                'discord_post. '
                 f'It replies to reply_to, a message discord_read gives (never a draft), pinging no one, in the '
                 f'channels {channels} lists and their threads, or in any Discord lets the bot see when it lists none. '
                 'Returns JSON {"status": "posted", "link", "message", "channel", "reply_to", "emoji"}. Another emoji, '
@@ -2696,32 +2785,18 @@ def tool_list(identity):
                 'properties': {
                     'channel': dict(ID, description='the channel or thread id to post in'),
                     'reply_to': dict(ID, description="the id of that channel's message it answers"),
-                    'emoji': {'type': 'string', 'enum': list(QUICK), 'description': 'the one emoji to post'},
+                    'emoji': {
+                        'type': 'string',
+                        'enum': list(identity.quick),
+                        'description': 'the one emoji to post',
+                    },
                 },
                 'required': ['channel', 'reply_to', 'emoji'],
                 'additionalProperties': False,
             },
         },
-        {
-            'name': 'discord_emoji_upload',
-            'description': (
-                f'Upload to a server one of the custom emojis {me} answers with, from its fixed file: name is one of '
-                f'{", ".join(DRAWN)}, the file {EMOJI_FOLDER}/<name>.png, uploaded as <name>. No other name or file. '
-                'One the server has by that name already is not uploaded again. It needs the Create Expressions '
-                f"permission there: without it, the error says so and the invite's permissions with it. Returns JSON "
-                '{"status": "uploaded", or "already there" when it was, "guild", "name", "id"}.'
-            ),
-            'inputSchema': {
-                'type': 'object',
-                'properties': {
-                    'guild': dict(ID, description='the server id to upload to'),
-                    'name': {'type': 'string', 'enum': list(DRAWN), 'description': 'the emoji, and its file'},
-                },
-                'required': ['guild', 'name'],
-                'additionalProperties': False,
-            },
-        },
-    ] + ([allowed] if identity.command else [])
+    ]
+    return tools + ([upload] if identity.drawn else []) + ([allowed] if identity.command else [])
 
 
 def failure(rid, code, message, data=None):
@@ -3040,7 +3115,13 @@ def main(argv=None, identity=AOGO):
     elif identity.greeting:
         greets = f', greeting a stranger once each {settings.greet_hours} h, {settings.greet_per_hour} an hour at most'
     log(f'up: owner {settings.owner}, {len(settings.users)} users, {where}{greets}')
-    serve(Server(tools, instructions(settings), write, listen, stop), sys.stdin.buffer, write)
+    said = instructions(settings)
+    server = Server(tools, said, write, listen, stop)
+    cut = cut_by_grok(settings, said)
+    if cut:
+        log(cut)
+        server.push(cut, {'kind': 'error'})  # with the first tool result too
+    serve(server, sys.stdin.buffer, write)
 
 
 if __name__ == '__main__':

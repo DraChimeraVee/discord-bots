@@ -76,6 +76,12 @@ class EnvFile(unittest.TestCase):
             self.assertIn(f'line 7: {key} is not a key XujiWimsy knows; it knows {KNOWS}', said)
         self.assertEqual((aw.XUJI.greeting, aw.XUJI.greet_keys), (None, ()))
 
+    def test_its_example_is_aogowimsys_first_four_keys_in_its_names(self):
+        aogo = (HERE.parent / 'aogo' / 'aogowimsy.env.example').read_text()
+        shared = aogo[: aogo.index('# AOGOWIMSY_CHANNELS=id,id\n') + len('# AOGOWIMSY_CHANNELS=id,id\n')]
+        renamed = shared.replace('AogoWimsy', 'XujiWimsy').replace('aogowimsy', 'xujiwimsy').replace('AOGO', 'XUJI')
+        self.assertEqual((HERE / 'xujiwimsy.env.example').read_text(), renamed)
+
     def test_its_values_are_checked_as_aogowimsys_naming_its_keys(self):
         self.assertIn('XUJIWIMSY_TOKEN is empty, and XujiWimsy needs it', self.refused(GOOD_ENV.replace(TOKEN, '')))
         said = self.refused(GOOD_ENV.replace(f'XUJIWIMSY_USERS = {FRIEND}', ''))
@@ -137,17 +143,41 @@ class Handshake(WithXuji):
         self.assertNotIn('Aogo', said)
         self.assertIn('<channel> events', aw.instructions(self.settings._replace(identity=aw.AOGO)))
 
+    def test_its_instructions_fit_in_what_grok_build_shows_its_model(self):
+        users = frozenset(f'20539067360960960{n}' for n in range(3))
+        channels = frozenset(f'130000000000000000{n}' for n in range(4))
+        for listed in (None, channels):  # every channel, or four listed: the README's settings and more
+            settings = self.settings._replace(users=users, channels=listed)
+            said = aw.instructions(settings)
+            self.assertLessEqual(len(said.encode()), aw.GROK_SHOWS)
+            self.assertTrue(said.endswith('which saves them and gives their paths.'))
+            self.assertIsNone(aw.cut_by_grok(settings, said))
+        many = self.settings._replace(channels=frozenset(f'1300000000000000{n:03d}' for n in range(30)))
+        said = aw.instructions(many)
+        self.assertEqual(
+            aw.cut_by_grok(many, said),
+            f"XujiWimsy's instructions are {len(said.encode())} bytes and Grok Build shows its model the first 2048: "
+            'the end of them (how to answer, attachments) is lost. List fewer ids in XUJIWIMSY_USERS or '
+            'XUJIWIMSY_CHANNELS, which take 651 bytes of them',  # 31 ids of 19 digits, each with its ', '
+        )
+        self.assertIsNone(aw.cut_by_grok(many._replace(identity=aw.AOGO), said))  # Claude Code shows them whole
+
     def test_its_tools_are_aogowimsys_in_its_own_names(self):
         xuji, aogo = aw.tool_list(aw.XUJI), aw.tool_list(aw.AOGO)
         text = json.dumps(xuji, ensure_ascii=False)
-        self.assertNotIn('Aogo', text)
-        self.assertNotIn('AOGO', text)
+        self.assertNotIn('aogo', text.lower().replace(f':{aw.WIMSY}:', ''))  # the owner's emoji alone is named for Aogo
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
-        as_aogo = text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY')
-        self.assertEqual(json.loads(as_aogo), [tool for tool in aogo if tool['name'] != 'discord_allowed'])
-        self.assertEqual(aogo[-1]['name'], 'discord_allowed')  # AogoWimsy's command's, which XujiWimsy has not
-        call = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'discord_allowed'}}
-        self.assertIn('Unknown tool: "discord_allowed"; XujiWimsy has', self.server.handle(call)['error']['message'])
+        reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
+        aogos = ('discord_emoji_upload', 'discord_allowed')  # Aogo's drawings' and its command's, which Xuji has not
+        as_aogo = json.loads(text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY'))
+        self.assertEqual(
+            [tool for tool in as_aogo if tool['name'] not in reacting],
+            [tool for tool in aogo if tool['name'] not in (*reacting, *aogos)],
+        )
+        self.assertEqual([tool['name'] for tool in xuji], [name for name in aw.TOOL_NAMES if name not in aogos])
+        for name in aogos:
+            call = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': name}}
+            self.assertIn(f'Unknown tool: "{name}"; XujiWimsy has', self.server.handle(call)['error']['message'])
         self.assertEqual(
             self.server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})['result'], {'tools': xuji}
         )
@@ -215,6 +245,34 @@ class Clients(WithXuji):
             self.assertIn('result', initialize(server, params))
         server.handle({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
         self.assertEqual(calls, [server.push])
+
+
+class Reactions(WithXuji):
+    """XujiWimsy answers with the unicode emojis alone: the drawn ones are Aogo's face"""
+
+    def test_it_reacts_and_quick_replies_with_the_unicode_ones_alone(self):
+        plain = [aw.EYES, aw.YES, aw.THUMBS, aw.NO]
+        tools = {tool['name']: tool for tool in aw.tool_list(aw.XUJI)}
+        for name in ('discord_react', 'discord_unreact', 'discord_quick'):
+            self.assertEqual(tools[name]['inputSchema']['properties']['emoji']['enum'], plain)
+        asked = self.fake.say(GENERAL, OWNER, 'can you look at the build?')
+        for emoji in (':wimsyaogo_eyes:', f':{aw.WIMSY}:'):
+            said = self.error('discord_react', channel=GENERAL, message=asked, emoji=emoji)
+            self.assertIn(f'emoji is "{emoji}", not one XujiWimsy reacts with: it takes {", ".join(plain)}', said)
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=asked, emoji=aw.EYES)['status'], 'reacted')
+        self.assertIn(
+            'not one XujiWimsy posts alone',
+            self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_done:'),
+        )
+        self.assertEqual(self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=aw.YES)['status'], 'posted')
+        self.assertEqual(self.fake.last(GENERAL)['content'], aw.YES)
+        self.assertEqual(self.fake.posts('GET', f'/guilds/{GUILD}/emojis'), [])  # no custom emoji looked for
+        said = aw.instructions(self.settings)
+        listed = f'{aw.EYES} (seen, on it); {aw.YES} (done); {aw.THUMBS} (agreed); {aw.NO} (cannot)'
+        self.assertIn(f'react to it with discord_react rather than post: {listed}; {aw.EYES} when you start', said)
+        self.assertIn(f'then discord_unreact it and put {aw.YES} when done. A reaction goes out at once', said)
+        self.assertIn(f'only these: {listed}. Use one instead of a post', tools['discord_react']['description'])
+        self.assertNotIn('wimsyaogo_', said + json.dumps(tools, ensure_ascii=False))
 
 
 class Posting(WithXuji):
@@ -379,6 +437,18 @@ class Stdio(unittest.TestCase):
         self.assertIn(f'xujiwimsy: up: owner {OWNER}, 1 users, 2 channels\n', errors)
         self.assertIn('xujiwimsy: discord_read failed: channel is "general"', errors)
         self.assertNotIn('aogowimsy', errors)
+
+    def test_instructions_grok_would_cut_are_said_on_stderr_and_with_the_first_tool_result(self):
+        channels = ', '.join(f'1300000000000000{n:03d}' for n in range(30))
+        env = base.write_env(self.folder.name, GOOD_ENV.replace(f'{GENERAL}, {HELP}', channels), name='many.env')
+        proc = self.start('--env', env)
+        self.exchange(proc, {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': GROK})
+        call = {'name': 'discord_read', 'arguments': {'channel': 'general'}}
+        answer = self.exchange(proc, {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': call})
+        news = answer['result']['content'][1]['text']
+        self.assertRegex(news, r"^XujiWimsy news: XujiWimsy's instructions are [0-9]+ bytes and Grok Build shows")
+        self.assertIn('List fewer ids in XUJIWIMSY_USERS or XUJIWIMSY_CHANNELS', news)
+        self.assertIn(news.removeprefix('XujiWimsy news: '), self.finish(proc))
 
     def test_claude_code_is_refused_and_stderr_says_so(self):
         proc = self.start('--env', self.env)

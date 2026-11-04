@@ -16,7 +16,7 @@ Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
 | `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through ten MCP tools: post (only once its owner approves the draft), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), upload the server's custom emojis it answers with, and list who its owner allowed. A slash command, `/aogo`: help for anyone, and its owner's allow for a time, deny and list. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, the listed users', those its owner allowed and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message | to Discord, the drafts (to its owner's DMs), the posts approved, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it, `/aogo` and its answers (seen by their asker alone); to the session, the messages it may read and the ones addressed to it |
-| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and nine of its tools, with Xuji's bot and settings. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed (the session gets what a tool returns), and it greets no one and has no command |
+| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and eight of its tools, with Xuji's bot and settings, its reactions and quick replies the unicode emojis alone. No channel: the session hears by waiting for a reply, and its owner's answers to its drafts and the gateway's news come with its next tool result | as AogoWimsy | as AogoWimsy, but nothing is pushed (the session gets what a tool returns), no drawn emoji, and it greets no one and has no command |
 
 No bot keeps a message or logs what was said, and none pings anyone but AogoWimsy's greeting, which pings its owner.
 
@@ -184,9 +184,11 @@ instructions to the session say which channels and greeting limits are in effect
 
 Xuji, the Grok Build session, on Discord as a bot user of its own. `xuji/xujiwimsy.py` runs `aogo/aogowimsy.py` with
 Xuji's identity (the table `IDENTITIES` there): its bot, its env file and keys, its name in every text. Everything else
-is AogoWimsy's, a fix to one a fix to both: the tools above but `discord_allowed`, with the same arguments, defaults and
-answers; the owner's check mark as the only way out; the owner, the listed users and the strangers he lets through;
-nothing stored, and stderr never saying what was said. It greets no one, takes no `GREET` key and has no command.
+is AogoWimsy's, a fix to one a fix to both: the tools above but `discord_emoji_upload` and `discord_allowed`, with the
+same arguments, defaults and answers; the owner's check mark as the only way out; the owner, the listed users and the
+strangers he lets through (his `:wimsyaogo:` too); nothing stored, and stderr never saying what was said. The drawn
+emojis are Aogo's face, so `discord_react`, `discord_unreact` and `discord_quick` take the unicode eyes, check mark,
+thumbs up and cross alone, and it uploads none. It greets no one, takes no `GREET` key and has no command.
 
 It serves any client but Claude Code: an `initialize` from `claude-code` gets an error naming it and AogoWimsy. It
 offers no channel (Grok Build shows no push), so it says in its instructions how Discord reaches the session:
@@ -202,17 +204,14 @@ offers no channel (Grok Build shows no push), so it says in its instructions how
 
 A message addressed to Xuji in a channel nobody waits on is not heard until the session reads that channel.
 
-Its settings, a line each of its env file, `~/.config/xujiwimsy/xujiwimsy.env` unless `--env FILE` names another (mode
-600 or stricter), with AogoWimsy's meanings and checks:
+Grok Build 1.0.70 shows its model the first 2048 bytes of a server's instructions and cuts the rest. XujiWimsy's fit with
+three listed users and up to 13 channels; more ids than that are said on stderr and with the first tool result, naming
+the bytes, so a list can be cut short before its model misses how to answer.
 
-| Key | Default | What it is |
-|---|---|---|
-| `XUJIWIMSY_TOKEN` | none: needed | the bot's token |
-| `XUJIWIMSY_OWNER` | none: needed | the owner's user id: who approves every post and lets a stranger's message through |
-| `XUJIWIMSY_USERS` | none: needed | `id,id`: whose messages reach the session (the owner's always do) |
-| `XUJIWIMSY_CHANNELS` | every channel and thread the bot can see | `id,id`: where it reads and posts; a thread of one of them counts as it |
-
-A key it does not know stops it, naming the key: an `AOGOWIMSY_` one too, so one bot's file never starts the other.
+Its settings are AogoWimsy's first four keys (the table above), named `XUJIWIMSY_TOKEN`, `XUJIWIMSY_OWNER`,
+`XUJIWIMSY_USERS` and `XUJIWIMSY_CHANNELS`, with their defaults, meanings and checks, in
+`~/.config/xujiwimsy/xujiwimsy.env` unless `--env FILE` names another (mode 600 or stricter). A key it does not know stops
+it, naming the key: an `AOGOWIMSY_` one too, so one bot's file never starts the other.
 Setting it up, after its application (below):
 
 1. Its owner shares a server with it and lets that server's members send them DMs, as for AogoWimsy.
@@ -263,7 +262,9 @@ allowed refused to anyone but the owner, each time and a wrong one, an allow's e
 use once, an allowed person's messages reaching the session and a stranger's not, an answer in a thread of its own, its
 token never shown), and its gateway client against a fake gateway on 127.0.0.1 (identify, heartbeats and their ACKs,
 resume, the close codes that stop it, pings, messages in frames), and that lines from several threads never mix on
-stdout; XujiWimsy's env file and keys (the other bot's refused), its server, instructions and tools in its own names,
+stdout; XujiWimsy's env file and keys (the other bot's refused, and its example AogoWimsy's in its names), its server,
+instructions and tools in its own names (no drawn emoji: the unicode ones alone; its instructions within what Grok shows,
+and too many ids said),
 the client each Wimsy serves, the news a tool result carries, a post as it reaches Discord, and the program itself on
 stdin and stdout.
 
@@ -284,8 +285,9 @@ One application each, in the Developer Portal:
 3. Invite (OAuth2, scopes `bot` and, for AogoWimsy's `/aogo`, `applications.commands`), with only what it needs:
    - AogoWimsy and XujiWimsy: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add
      Reactions (`discord_react`), Attach Files (`discord_post`'s images; the drafts, their card and their reactions
-     are in DMs, which need none): `permissions=274878008384`. A custom emoji of another server than the message's
-     also needs Use External Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070971030592` with it.
+     are in DMs, which need none): `permissions=274878008384`. AogoWimsy: a custom emoji of another server than the
+     message's also needs Use External Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070971030592`
+     with it.
 
    `https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=<number>`
 
