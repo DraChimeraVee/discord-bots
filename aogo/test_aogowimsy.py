@@ -1879,6 +1879,16 @@ class Channels(Hearing):
         meta = {'kind': 'message', 'author': 'friend', 'author_id': FRIEND, 'channel': HELP, 'message_id': number}
         self.assertEqual(self.pushes, [('<@1000000000000000001> look', meta)])
 
+    def test_a_mention_written_in_the_text_counts_though_it_pinged_no_one(self):
+        # a bot's post that allows no ping (a Wimsy's: allowed_mentions parse []) comes with no mentions
+        for text in (f'<@{BOT}> the plan is ready', f'plan for <@!{BOT}>', f'<@&{BOT_ROLE}> plan'):
+            number = self.heard(HELP, FRIEND, text)
+            self.assertEqual(self.pushes[-1][1]['message_id'], number, text)
+        count = len(self.pushes)
+        for text in (f'<@{FRIEND}> not you', f'`{BOT}` its id alone', f'<#{HELP}> a channel'):
+            self.heard(HELP, FRIEND, text)
+        self.assertEqual(len(self.pushes), count)
+
     def test_a_mention_of_aogos_role_is_a_mention_of_aogo(self):
         number = self.heard(HELP, FRIEND, f'<@&{BOT_ROLE}> look', mention_roles=[BOT_ROLE])
         meta = {'kind': 'message', 'author': 'friend', 'author_id': FRIEND, 'channel': HELP, 'message_id': number}

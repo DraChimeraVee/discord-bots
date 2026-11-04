@@ -954,10 +954,15 @@ def view(message, approved=False):
 
 def mentions_me(message, me, roles):
     """whether a message mentions the bot's user or its role: the one Discord makes for a bot, of its name, which
-    @Aogo may pick as well (DraVee's of 2026-10-24 did)"""
+    @Aogo may pick as well (DraVee's of 2026-10-24 did). A mention written in the text counts though it pinged no
+    one: Discord builds a message's mentions from the pings its poster allowed, and a Wimsy's post allows none, so
+    the other Wimsy's call reaches it only so"""
     if any(user.get('id') == me for user in message.get('mentions') or []):
         return True
-    return any(role in roles for role in message.get('mention_roles') or [])
+    if any(role in roles for role in message.get('mention_roles') or []):
+        return True
+    written = set(re.findall(r'<@[!&]?([0-9]{17,20})>', message.get('content') or ''))
+    return me in written or bool(written & set(roles))
 
 
 def bot_roles(roles, me):

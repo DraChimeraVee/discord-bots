@@ -478,6 +478,17 @@ class Monitors(WithXuji):
             lines.readline(), f'approved: Stranger ({STRANGER}) in channel {GENERAL}, message {number}: "hey xuji"\n'
         )
 
+    def test_the_other_wimsy_listed_reaches_it_by_naming_it_in_its_text(self):
+        # as AogoWimsy hands a session's work over: its post pings no one, so Discord gives it no mentions
+        self.bot.settings = self.bot.settings._replace(users=self.bot.settings.users | {base.OTHER_BOT})
+        lines = self.monitor()
+        number = self.fake.say(GENERAL, base.OTHER_BOT, f'<@{BOT}> triage the open PRs, please')
+        self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        said = f'"<@{BOT}> triage the open PRs, please"'
+        self.assertEqual(
+            lines.readline(), f'message: ReiWimsy ({base.OTHER_BOT}) in channel {GENERAL}, message {number}: {said}\n'
+        )
+
     def test_a_line_fits_what_the_monitor_shows_its_text_cut_short_and_said(self):
         meta = {'kind': 'message', 'author': 'DraVee', 'author_id': OWNER, 'channel': GENERAL, 'message_id': HELP}
         meta.update(reply_to=OTHER, attachments='build.log; shot.png')
