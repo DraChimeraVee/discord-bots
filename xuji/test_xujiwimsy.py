@@ -6,7 +6,6 @@ AogoWimsy's suite tests the code they share; its fake Discord serves here too.""
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import threading
@@ -391,31 +390,13 @@ class GatewayNames(WithXuji):
 class Stdio(unittest.TestCase):
     """the real xujiwimsy.py, as Grok Build starts it; never told initialized, so it never reaches for Discord"""
 
-    exchange, finish = base.Stdio.exchange, base.Stdio.finish
+    exchange, finish, start, ended = base.Stdio.exchange, base.Stdio.finish, base.Stdio.start, base.Stdio.ended
+    program = HERE / 'xujiwimsy.py'
 
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.env = base.write_env(self.folder.name, GOOD_ENV, name='xujiwimsy.env')
-
-    def start(self, *args, environ=None, program=HERE / 'xujiwimsy.py'):
-        command = [sys.executable, str(program), *args]
-        proc = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environ
-        )
-        watchdog = threading.Timer(20, proc.kill)
-        watchdog.start()
-        self.addCleanup(self.ended, proc, watchdog)
-        return proc
-
-    def ended(self, proc, watchdog):
-        """a program a test left running or open, when it failed halfway: killed and closed"""
-        watchdog.cancel()
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            stream.close()
 
     def test_the_handshake_tools_list_and_a_tool_call_through_a_subprocess(self):
         proc = self.start('--env', self.env)

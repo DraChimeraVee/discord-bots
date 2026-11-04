@@ -3049,13 +3049,26 @@ class Stdio(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.env = write_env(self.folder.name, GOOD_ENV)
 
-    def start(self, *args):
-        command = [sys.executable, str(HERE / 'aogowimsy.py'), *args]
-        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    program = HERE / 'aogowimsy.py'  # xuji/test_xujiwimsy.py's Stdio runs its own with these helpers
+
+    def start(self, *args, environ=None, program=None):
+        command = [sys.executable, str(program or self.program), *args]
+        proc = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environ
+        )
         watchdog = threading.Timer(20, proc.kill)
         watchdog.start()
-        self.addCleanup(watchdog.cancel)
+        self.addCleanup(self.ended, proc, watchdog)
         return proc
+
+    def ended(self, proc, watchdog):
+        """a program a test left running or open, when it failed halfway: killed and closed"""
+        watchdog.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            stream.close()
 
     def exchange(self, proc, message):
         line = message if isinstance(message, bytes) else json.dumps(message).encode()

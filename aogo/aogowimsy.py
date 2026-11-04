@@ -1112,14 +1112,18 @@ def command_list(identity):
         {
             'type': CHAT_INPUT,
             'name': identity.command,
-            'description': "Aogo, DraVee's AI assistant on ScarletNX",
+            'description': f"{identity.who}, DraVee's AI assistant on ScarletNX",
             'default_member_permissions': None,
             'options': [
-                {'type': SUB_COMMAND, 'name': 'help', 'description': 'What Aogo is and how to ask it something'},
+                {
+                    'type': SUB_COMMAND,
+                    'name': 'help',
+                    'description': f'What {identity.who} is and how to ask it something',
+                },
                 {
                     'type': SUB_COMMAND,
                     'name': 'allow',
-                    'description': "DraVee only: let someone's messages reach Aogo for a time",
+                    'description': f"DraVee only: let someone's messages reach {identity.who} for a time",
                     'options': [user('Who to allow'), dict(time_option, choices=times)],
                 },
                 {
