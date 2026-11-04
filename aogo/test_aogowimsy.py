@@ -6,6 +6,7 @@ pushes to the session, and the gateway client itself against a fake WebSocket ga
 import base64
 import email.parser
 import email.policy
+import fcntl
 import hashlib
 import http.server
 import json
@@ -13,6 +14,7 @@ import os
 import queue
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,17 +29,34 @@ sys.path.insert(0, str(HERE))
 import aogowimsy as aw
 
 os.environ['no_proxy'] = os.environ['NO_PROXY'] = '127.0.0.1'  # the fakes, never through a proxy
+# the greetings' state folder of every Wimsy made here, the programs started too: never the user's ~/.local/state
+STATE_HOME = tempfile.TemporaryDirectory(prefix='aogowimsy-tests-')
+os.environ['XDG_STATE_HOME'] = STATE_HOME.name
 
 TOKEN = 'MTAwMDAw.fake-token_for.tests'
 PNG = b'\x89PNG\r\n\x1a\n a fake image'
 BOT, OWNER, FRIEND, STRANGER, OTHER_PERSON = (f'10000000000000000{n:02d}' for n in (1, 2, 3, 4, 5))
-GUILD = '200000000000000001'
+GUILD, OTHER_GUILD = '200000000000000001', '200000000000000002'
 BOT_ROLE, OTHER_BOT_ROLE, HELPERS_ROLE = (f'70000000000000000{n:02d}' for n in (1, 2, 3))
 GENERAL, HELP, OTHER, THREAD, OTHER_THREAD, NEW_THREAD = (f'3000000000000000{n:02d}' for n in (1, 2, 3, 11, 12, 13))
 DM, FRIEND_DM, STRANGER_DM = '400000000000000001', '400000000000000002', '400000000000000003'
 WIMSY = f'{aw.WIMSY}:600000000000000001'  # the owner's custom emoji, as a reaction's path names it
 OTHER_EMOJI = 'wimsyother:600000000000000002'
-YES, NO = aw.YES, aw.NO
+YES, NO, EYES, THUMBS = aw.YES, aw.NO, aw.EYES, aw.THUMBS
+OWNERS = f':{aw.WIMSY}:'  # the owner's custom emoji, as discord_react takes it
+DRAWN_IDS = {name: f'6000000000000001{n:02d}' for n, name in enumerate(aw.DRAWN)}  # once uploaded to the server
+CUSTOM = ':wimsyaogo_eyes:, :wimsyaogo_done:, :wimsyaogo_thumbsup:, :wimsyaogo_no:'
+PNG_EMOJI = b'\x89PNG\r\n\x1a\n an emoji'
+OTHER_BOT = '1000000000000000006'  # another bot on the server: a stranger, and a bot
+APP = '900000000000000001'  # AogoWimsy's application, whose id is not its user's here
+CALLERS = [f'10000000000000001{n:02d}' for n in range(12)]  # strangers the fake knows by id alone
+# the greeting as DraVee worded it (2026-11-02), and the one mention it lets ping
+LINE = (
+    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets "
+    f'through. <@{OWNER}>'
+)
+PINGS = {'parse': [], 'users': [OWNER], 'replied_user': False}
+READY = {'user': {'id': BOT}, 'application': {'id': APP}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'}
 INITIALIZE = {
     'protocolVersion': '2025-11-25',
     'capabilities': {},
@@ -52,6 +71,8 @@ class FakeDiscord:
         ('GET', r'/users/@me', 'me'),
         ('GET', r'/users/@me/guilds', 'guilds'),
         ('GET', r'/guilds/(\d+)/roles', 'guild_roles'),
+        ('GET', r'/guilds/(\d+)/emojis', 'guild_emojis'),
+        ('POST', r'/guilds/(\d+)/emojis', 'create_emoji'),
         ('POST', r'/users/@me/channels', 'open_dm'),
         ('GET', r'/gateway/bot', 'gateway'),
         ('GET', r'/channels/(\d+)', 'channel'),
@@ -60,7 +81,12 @@ class FakeDiscord:
         ('GET', r'/channels/(\d+)/messages/(\d+)', 'message'),
         ('PATCH', r'/channels/(\d+)/messages/(\d+)', 'edit'),
         ('PUT', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)/@me', 'react_me'),
+        ('DELETE', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)/@me', 'unreact_me'),
         ('GET', r'/channels/(\d+)/messages/(\d+)/reactions/([^/]+)', 'reactors'),
+        ('GET', r'/applications/@me', 'application'),
+        ('GET', r'/applications/(\d+)/guilds/(\d+)/commands', 'guild_commands'),
+        ('PUT', r'/applications/(\d+)/guilds/(\d+)/commands', 'overwrite_commands'),
+        ('POST', r'/interactions/(\d+)/([^/]+)/callback', 'interaction_answer'),
     )
 
     def __init__(self):
@@ -70,6 +96,7 @@ class FakeDiscord:
             FRIEND: {'id': FRIEND, 'username': 'friend', 'global_name': None},
             STRANGER: {'id': STRANGER, 'username': 'stranger', 'global_name': 'Stranger'},
             OTHER_PERSON: {'id': OTHER_PERSON, 'username': 'other', 'global_name': 'Other'},
+            OTHER_BOT: {'id': OTHER_BOT, 'username': 'reiwimsy', 'global_name': 'ReiWimsy', 'bot': True},
         }
         guild = {'type': 0, 'guild_id': GUILD}
         self.channels = {
@@ -90,6 +117,13 @@ class FakeDiscord:
             {'id': OTHER_BOT_ROLE, 'name': 'ReiWimsy', 'managed': True, 'tags': {'bot_id': OTHER_PERSON}},
             {'id': HELPERS_ROLE, 'name': 'helpers', 'managed': False},
         ]
+        self.guild_ids = [GUILD]  # the servers the bot is in
+        self.server_emojis = {  # each server's custom emojis
+            GUILD: [
+                {'id': WIMSY.split(':')[1], 'name': aw.WIMSY},
+                {'id': OTHER_EMOJI.split(':')[1], 'name': 'wimsyother'},
+            ]
+        }
         self.messages = {channel: [] for channel in self.channels}  # oldest first
         self.reactions = {}  # a message id: {emoji: [user ids]}
         self.requests = []  # (method, path, query, body)
@@ -99,6 +133,9 @@ class FakeDiscord:
         self.origin = 'http://127.0.0.1:9'  # the fake's own address, where its attachments are served
         self.blobs = {}  # an attachment's path: its bytes, as the CDN serves them
         self.serial = 1_500_000_000_000_000_000
+        self.commands = {}  # a server's commands of the application, as Discord gives them back
+        self.no_commands_scope = set()  # servers whose install lacks applications.commands
+        self.answers = {}  # an interaction's id: the answer it got, once
         self.lock = threading.Lock()
 
     def say(self, channel, author, content='', mentions=(), reply_to=None, **extra):
@@ -161,11 +198,12 @@ class FakeDiscord:
             return self.route(method, path, query, body, headers)
 
     def route(self, method, path, query, body, headers):
-        if headers.get('Authorization') != f'Bot {TOKEN}':
+        path = path.removeprefix('/api/v10')
+        answering = path.startswith('/interactions/')  # an interaction's answer: its token is in the path
+        if headers.get('Authorization') != (None if answering else f'Bot {TOKEN}'):
             return 401, {'message': '401: Unauthorized', 'code': 0}, {}
         if not (headers.get('User-Agent') or '').startswith('DiscordBot ('):
             return 400, {'message': 'no DiscordBot User-Agent', 'code': 0}, {}
-        path = path.removeprefix('/api/v10')
         self.requests.append((method, path, query, body))
         if (method, path) in self.limits:
             self.limits.remove((method, path))
@@ -183,12 +221,31 @@ class FakeDiscord:
         return 200, self.users[BOT], {}
 
     def guilds(self, query, body):
-        return 200, [{'id': GUILD, 'name': 'ScarletNX'}], {}
+        return 200, [{'id': guild, 'name': f'server {guild}'} for guild in self.guild_ids], {}
 
     def guild_roles(self, query, body, guild):
-        if guild != GUILD:
+        if guild not in self.guild_ids:
             return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
-        return 200, self.server_roles, {}
+        return 200, self.server_roles if guild == GUILD else [], {}
+
+    def guild_emojis(self, query, body, guild):
+        if guild not in self.guild_ids:
+            return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
+        return 200, self.server_emojis.get(guild, []), {}
+
+    def create_emoji(self, query, body, guild):
+        if guild not in self.guild_ids:
+            return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
+        if set(body) != {'name', 'image'} or not body['image'].startswith('data:image/png;base64,'):
+            return 400, {'code': 50035, 'message': 'Invalid Form Body', 'errors': {}}, {}
+        made = {'id': DRAWN_IDS.get(body['name'], '600000000000000999'), 'name': body['name'], 'available': True}
+        self.server_emojis.setdefault(guild, []).append(made)
+        return 201, made, {}
+
+    def upload(self, *names, guild=GUILD):
+        """the server's emojis of these names, as if the owner uploaded them"""
+        for name in names:
+            self.server_emojis.setdefault(guild, []).append({'id': DRAWN_IDS[name], 'name': name})
 
     def open_dm(self, query, body):
         if body != {'recipient_id': OWNER}:
@@ -254,11 +311,65 @@ class FakeDiscord:
         return 200, self.render(found), {}
 
     def react_me(self, query, body, channel, message, emoji):
-        self.react(message, emoji, BOT)
+        if not self.find(channel, message):
+            return 404, {'message': 'Unknown Message', 'code': 10008}, {}
+        name, _, number = emoji.partition(':')
+        known = [item for items in self.server_emojis.values() for item in items]
+        if number and not any(item['id'] == number and item['name'] == name for item in known):
+            return 400, {'message': 'Unknown Emoji', 'code': 10014}, {}
+        if BOT not in self.reactions.get(message, {}).get(emoji, []):
+            self.react(message, emoji, BOT)
+        return 204, None, {}
+
+    def unreact_me(self, query, body, channel, message, emoji):
+        if not self.find(channel, message):
+            return 404, {'message': 'Unknown Message', 'code': 10008}, {}
+        kept = self.reactions.get(message, {})
+        if BOT in kept.get(emoji, []):
+            kept[emoji].remove(BOT)
+            if not kept[emoji]:
+                del kept[emoji]
         return 204, None, {}
 
     def reactors(self, query, body, channel, message, emoji):
         return 200, [self.users[u] for u in self.reactions.get(message, {}).get(emoji, [])], {}
+
+    def application(self, query, body):
+        return 200, {'id': APP, 'name': 'Aogo', 'bot': self.users[BOT]}, {}
+
+    def guild_commands(self, query, body, app, guild):
+        if app != APP or guild not in self.guild_ids:
+            return 404, {'message': 'Unknown Guild', 'code': 10004}, {}
+        if guild in self.no_commands_scope:
+            return 403, {'message': 'Missing Access', 'code': 50001}, {}
+        return 200, self.commands.get(guild, []), {}
+
+    def overwrite_commands(self, query, body, app, guild):
+        status, said, extra = self.guild_commands(query, body, app, guild)
+        if status != 200:
+            return status, said, extra
+
+        def as_kept(item):  # as Discord gives an option back: required only when true, no empty lists
+            kept = {k: v for k, v in item.items() if not (k == 'required' and not v)}
+            if item.get('options'):
+                kept['options'] = [as_kept(each) for each in item['options']]
+            return kept
+
+        kept = []
+        for place, command in enumerate(body):
+            stored = dict(as_kept(command), id=f'80000000000000{place:04d}', application_id=APP, guild_id=guild)
+            stored.update(version='1', nsfw=False, name_localizations=None, description_localizations=None)
+            kept.append(stored)
+        self.commands[guild] = kept
+        return 200, kept, {}
+
+    def interaction_answer(self, query, body, number, token):
+        if token != f'token-{number}':
+            return 401, {'message': 'Invalid interaction token', 'code': 50027}, {}
+        if number in self.answers:
+            return 400, {'message': 'Interaction has already been acknowledged.', 'code': 40060}, {}
+        self.answers[number] = body
+        return 204, None, {}
 
 
 def form_body(kind, raw):
@@ -417,6 +528,27 @@ class EnvFile(unittest.TestCase):
         with self.assertRaisesRegex(aw.Refused, 'AOGOWIMSY_TOKEN is empty, and AogoWimsy needs it'):
             aw.read_settings(example)
 
+    def test_the_greetings_limits_are_read_checked_and_named(self):
+        settings = aw.read_settings(self.env(GOOD_ENV))
+        self.assertEqual((settings.greet_hours, settings.greet_per_hour), (aw.GREET_HOURS, aw.GREET_PER_HOUR))
+        self.assertEqual((aw.GREET_HOURS, aw.GREET_PER_HOUR), (24, 10))
+        settings = aw.read_settings(self.env(GOOD_ENV + 'AOGOWIMSY_GREET_HOURS=48\nAOGOWIMSY_GREET_PER_HOUR = 0\n'))
+        self.assertEqual((settings.greet_hours, settings.greet_per_hour), (48, 0))
+        hours, per_hour = 'not a whole number from 1 to 720', 'not a whole number from 0 to 100'
+        for line, said in (
+            ('AOGOWIMSY_GREET_HOURS=abc', f'AOGOWIMSY_GREET_HOURS is "abc", {hours}'),
+            ('AOGOWIMSY_GREET_HOURS=0', f'AOGOWIMSY_GREET_HOURS is "0", {hours}'),
+            ('AOGOWIMSY_GREET_HOURS=721', f'AOGOWIMSY_GREET_HOURS is "721", {hours}'),
+            ('AOGOWIMSY_GREET_HOURS=', f'AOGOWIMSY_GREET_HOURS is "", {hours}'),
+            ('AOGOWIMSY_GREET_PER_HOUR=101', f'AOGOWIMSY_GREET_PER_HOUR is "101", {per_hour}'),
+            ('AOGOWIMSY_GREET_PER_HOUR=-1', f'AOGOWIMSY_GREET_PER_HOUR is "-1", {per_hour}'),
+            ('AOGOWIMSY_GREET_PER_HOUR=1e1', f'AOGOWIMSY_GREET_PER_HOUR is "1e1", {per_hour}'),
+        ):
+            self.assertIn(said, self.refused(GOOD_ENV + line + '\n'))
+        example = (HERE / 'aogowimsy.env.example').read_text()  # it says the defaults the code has
+        self.assertIn(f'\n# AOGOWIMSY_GREET_HOURS={aw.GREET_HOURS}\n', example)
+        self.assertIn(f'\n# AOGOWIMSY_GREET_PER_HOUR={aw.GREET_PER_HOUR}\n', example)
+
     def test_a_missing_file_says_so(self):
         with self.assertRaisesRegex(aw.Refused, 'nowhere.env cannot be read'):
             aw.read_settings(str(Path(self.folder.name) / 'nowhere.env'))
@@ -436,6 +568,11 @@ class WithDiscord(unittest.TestCase):
         cls.http.server_close()
 
     def setUp(self):
+        state = tempfile.TemporaryDirectory()  # each test's greetings, and the restarts it makes
+        self.addCleanup(state.cleanup)
+        self.addCleanup(os.environ.__setitem__, 'XDG_STATE_HOME', os.environ['XDG_STATE_HOME'])
+        os.environ['XDG_STATE_HOME'] = state.name
+        self.state = Path(state.name) / 'aogowimsy'
         self.fake = self.http.fake = FakeDiscord()
         self.fake.origin = f'http://127.0.0.1:{self.http.server_port}'
         self.clock = FakeClock()
@@ -751,7 +888,10 @@ class Read(WithDiscord):
         both = self.tool('discord_read', channel=GENERAL, **{'from': [OWNER, FRIEND]})
         self.assertEqual([m['id'] for m in both['messages']], [ids[0], ids[2]])
         said = self.error('discord_read', channel=GENERAL, **{'from': [FRIEND, STRANGER]})
-        self.assertEqual(said, f'from item 2 is {STRANGER}, neither the owner ({OWNER}) nor a listed user ({FRIEND})')
+        self.assertEqual(
+            said,
+            f'from item 2 is {STRANGER}, neither the owner ({OWNER}), a listed user ({FRIEND}) nor one he allowed',
+        )
         self.assertIn(
             'from is []: a list of 1 or more ids', self.error('discord_read', channel=GENERAL, **{'from': []})
         )
@@ -982,6 +1122,464 @@ class Attachments(WithDiscord):
         self.assertEqual([p.name for p in folder.iterdir()], ['a.png'])
 
 
+class React(WithDiscord):
+    """discord_react and discord_unreact: a fixed few reactions, at once, on a message discord_read gives"""
+
+    def put(self, channel, message, emoji):
+        return self.fake.posts('PUT', f'/channels/{channel}/messages/{message}/reactions/{emoji}/@me')
+
+    def emojis_asked(self, guild=GUILD):
+        return len(self.fake.posts('GET', f'/guilds/{guild}/emojis'))
+
+    def test_each_reaction_goes_at_once_with_no_draft_and_stderr_says_whose_where_and_which(self):
+        asked = self.fake.say(GENERAL, OWNER, 'can you look at the build?')
+        for emoji in (EYES, YES, THUMBS, NO):
+            with self.subTest(emoji=emoji):
+                got = self.tool('discord_react', channel=GENERAL, message=asked, emoji=emoji)
+                self.assertEqual(got, {'status': 'reacted', 'channel': GENERAL, 'message': asked, 'emoji': emoji})
+                self.assertEqual(self.fake.reactions[asked][emoji], [BOT])
+                self.assertEqual(len(self.put(GENERAL, asked, emoji)), 1)
+        self.assertEqual((self.fake.messages[DM], self.clock.waits), ([], []))  # no draft, no wait
+        said = f'discord_react: reacted, {EYES} of AogoWimsy on message {asked} in channel {GENERAL}'
+        self.assertEqual(self.logs[:2], [said, 'discord_react: reacted'])
+        self.assertNotIn('can you look', ' '.join(self.logs))
+
+    def test_any_other_emoji_is_refused_naming_it_its_code_points_and_the_ones_taken(self):
+        asked = self.fake.say(GENERAL, OWNER, 'hello')
+        taken = f'not one AogoWimsy reacts with: it takes {CUSTOM}, {EYES}, {YES}, {THUMBS}, {NO}, :wimsyaogo:'
+        party, selector = chr(0x1F389), chr(0xFE0F)
+        cases = (
+            (party, f'emoji is "{party}" (U+1F389), {taken}'),
+            (THUMBS + selector, f'emoji is "{THUMBS}{selector}" (U+1F44D U+FE0F), {taken}'),
+            ('wimsyaogo', f'emoji is "wimsyaogo", {taken}'),
+            ('wimsyaogo_eyes', f'emoji is "wimsyaogo_eyes", {taken}'),
+            (':wimsytetoutau:', f'emoji is ":wimsytetoutau:", {taken}'),
+            (WIMSY, f'emoji is "{WIMSY}", {taken}'),
+            ('', f'emoji is "", {taken}'),
+            (5, f'emoji is 5, {taken}'),
+        )
+        for tool in ('discord_react', 'discord_unreact'):
+            for emoji, said in cases:
+                with self.subTest(tool=tool, emoji=emoji):
+                    self.assertEqual(self.error(tool, channel=GENERAL, message=asked, emoji=emoji), said)
+        self.assertEqual((self.fake.requests, self.fake.reactions), ([], {}))
+        self.assertIn(f'discord_react failed: emoji is "{party}" (U+1F389), {taken}', self.logs)
+
+    def test_a_channel_it_may_not_read_is_refused_and_nothing_is_put(self):
+        elsewhere = self.fake.say(OTHER, OWNER, 'in a channel not listed')
+        in_thread = self.fake.say(OTHER_THREAD, OWNER, 'in a thread of it')
+        said = self.error('discord_react', channel=OTHER, message=elsewhere, emoji=EYES)
+        lists = f'channel {OTHER} is not one AogoWimsy may read: AOGOWIMSY_CHANNELS lists {GENERAL}, {HELP}'
+        self.assertIn(lists, said)
+        self.assertIn(f"the owner's DMs with AogoWimsy are {DM}", said)
+        said = self.error('discord_react', channel=OTHER_THREAD, message=in_thread, emoji=EYES)
+        self.assertIn(f'channel {OTHER_THREAD} is not one AogoWimsy may read', said)
+        said = self.error('discord_unreact', channel=OTHER, message=elsewhere, emoji=EYES)
+        self.assertIn(f'channel {OTHER} is not one AogoWimsy may read', said)
+        self.assertEqual([r for r in self.fake.requests if '/messages' in r[1]], [])  # the message never asked for
+        self.assertEqual(self.fake.reactions, {})
+        for channel in (THREAD, DM):  # a thread of a listed channel, and the owner's DMs, without being listed
+            number = self.fake.say(channel, OWNER, 'here')
+            self.assertEqual(
+                self.tool('discord_react', channel=channel, message=number, emoji=EYES)['status'], 'reacted'
+            )
+        self.bot.settings = self.settings._replace(channels=None)
+        self.assertEqual(self.tool('discord_react', channel=OTHER, message=elsewhere, emoji=EYES)['status'], 'reacted')
+
+    def test_a_strangers_message_the_owner_did_not_let_through_is_refused_naming_no_one(self):
+        theirs = self.fake.say(GENERAL, STRANGER, 'a secret of the stranger', mentions=[BOT])
+        said = self.error('discord_react', channel=GENERAL, message=theirs, emoji=EYES)
+        self.assertIn(f'message {theirs} is not one AogoWimsy gives', said)
+        self.assertNotIn(STRANGER, said)
+        self.assertFalse(self.put(GENERAL, theirs, EYES))
+        self.fake.react(theirs, WIMSY, OWNER)
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=theirs, emoji=EYES)['status'], 'reacted')
+
+    def test_a_draft_takes_no_reaction_and_loses_none(self):
+        draft = self.tool('discord_post', channel=GENERAL, text='hello', wait=0)['draft']
+        for tool in ('discord_react', 'discord_unreact'):
+            for emoji in (YES, EYES):
+                said = self.error(tool, channel=DM, message=draft, emoji=emoji)
+                self.assertEqual(
+                    said,
+                    f"message {draft} is a draft of AogoWimsy's: its {YES} and {NO} are for the owner's answer, and "
+                    f'{tool} touches no draft',
+                )
+        self.assertEqual(self.fake.reactions[draft], {YES: [BOT], NO: [BOT]})
+        self.assertFalse([r for r in self.fake.requests if r[0] == 'DELETE'])
+        plain = self.fake.say(DM, BOT, 'a plain message of its own')
+        self.assertEqual(self.tool('discord_react', channel=DM, message=plain, emoji=YES)['status'], 'reacted')
+
+    def test_twice_is_already_there_and_unreact_takes_off_its_own_alone(self):
+        asked = self.fake.say(GENERAL, FRIEND, 'is it fixed?')
+        self.fake.react(asked, EYES, OWNER)
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=asked, emoji=EYES)['status'], 'reacted')
+        again = self.tool('discord_react', channel=GENERAL, message=asked, emoji=EYES)
+        self.assertEqual(again, {'status': 'already there', 'channel': GENERAL, 'message': asked, 'emoji': EYES})
+        self.assertEqual(len(self.put(GENERAL, asked, EYES)), 1)
+        gone = self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=EYES)
+        self.assertEqual(gone, {'status': 'removed', 'channel': GENERAL, 'message': asked, 'emoji': EYES})
+        self.assertEqual(self.fake.reactions[asked], {EYES: [OWNER]})  # the owner's stays
+        self.assertEqual(
+            self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=EYES)['status'], 'not there'
+        )
+        self.assertEqual(
+            len(self.fake.posts('DELETE', f'/channels/{GENERAL}/messages/{asked}/reactions/{EYES}/@me')), 1
+        )
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=asked, emoji=YES)['status'], 'reacted')
+        self.assertEqual(self.fake.reactions[asked], {EYES: [OWNER], YES: [BOT]})
+        said = f'discord_unreact: not there, {EYES} of AogoWimsy on message {asked} in channel {GENERAL}'
+        self.assertIn(said, self.logs)
+
+    def test_wimsyaogo_goes_by_the_servers_emoji_asked_once_and_comes_off_by_its_own(self):
+        first, second = self.fake.say(GENERAL, OWNER, 'one'), self.fake.say(HELP, FRIEND, 'two')
+        for channel, number in ((GENERAL, first), (HELP, second)):
+            got = self.tool('discord_react', channel=channel, message=number, emoji=OWNERS)
+            self.assertEqual(got, {'status': 'reacted', 'channel': channel, 'message': number, 'emoji': OWNERS})
+            self.assertEqual(self.fake.reactions[number], {WIMSY: [BOT]})
+        self.assertEqual(self.emojis_asked(), 1)
+        self.assertFalse(self.fake.posts('GET', '/users/@me/guilds'))  # the channel's server had it
+        gone = self.tool('discord_unreact', channel=GENERAL, message=first, emoji=OWNERS)
+        self.assertEqual(gone['status'], 'removed')
+        self.assertEqual(self.fake.reactions[first], {})
+        self.assertEqual(self.emojis_asked(), 1)
+
+    def test_wimsyaogo_takes_the_id_a_reaction_on_the_message_has(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        theirs = self.fake.say(GENERAL, STRANGER, 'thanks', reply_to=mine)
+        self.fake.react(theirs, WIMSY, OWNER)  # the owner let it through
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=theirs, emoji=OWNERS)['status'], 'reacted')
+        self.assertEqual(self.fake.reactions[theirs], {WIMSY: [OWNER, BOT]})
+        self.assertEqual(self.emojis_asked(), 0)
+        said = self.error('discord_react', channel=GENERAL, message=mine, emoji='wimsyother')
+        self.assertIn('emoji is "wimsyother", not one AogoWimsy reacts with', said)
+
+    def test_wimsyaogo_in_the_owners_dms_or_a_server_without_it_comes_from_another_server_it_is_in(self):
+        self.fake.guild_ids.append(OTHER_GUILD)
+        made = 'wimsyaogo:600000000000000003'
+        self.fake.server_emojis = {GUILD: [], OTHER_GUILD: [{'id': made.split(':')[1], 'name': aw.WIMSY}]}
+        in_dm, in_general = self.fake.say(DM, OWNER, 'in the DMs'), self.fake.say(GENERAL, OWNER, 'in general')
+        for channel, number in ((DM, in_dm), (GENERAL, in_general)):
+            self.assertEqual(
+                self.tool('discord_react', channel=channel, message=number, emoji=OWNERS)['status'], 'reacted'
+            )
+            self.assertEqual(self.fake.reactions[number], {made: [BOT]})
+        # the channel's server asked again for what it lacked: an emoji may have been uploaded since
+        self.assertEqual((self.emojis_asked(GUILD), self.emojis_asked(OTHER_GUILD)), (2, 1))
+
+    def test_wimsyaogo_no_server_has_is_refused_naming_the_servers_looked_in(self):
+        self.fake.guild_ids.append(OTHER_GUILD)
+        self.fake.server_emojis = {GUILD: [{'id': OTHER_EMOJI.split(':')[1], 'name': 'wimsyother'}]}
+        asked = self.fake.say(HELP, OWNER, 'hi')
+        said = self.error('discord_react', channel=HELP, message=asked, emoji=OWNERS)
+        self.assertEqual(
+            said,
+            f'no server AogoWimsy is in has an emoji named wimsyaogo (it looked in {GUILD}, {OTHER_GUILD})',
+        )
+        self.assertEqual(self.fake.reactions, {})
+
+    def test_the_servers_emojis_are_asked_again_once_it_is_joined_again_or_discord_refuses_the_one_known(self):
+        asked = self.fake.say(GENERAL, OWNER, 'hi')
+        self.tool('discord_react', channel=GENERAL, message=asked, emoji=OWNERS)
+        self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=OWNERS)
+        renewed = 'wimsyaogo:600000000000000004'
+        self.fake.server_emojis[GUILD] = [{'id': renewed.split(':')[1], 'name': aw.WIMSY}]  # made again: a new id
+        aw.Ear(self.bot, lambda text, meta: None, threading.Event()).hear(
+            'GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []}
+        )
+        self.tool('discord_react', channel=GENERAL, message=asked, emoji=OWNERS)
+        self.assertEqual((self.fake.reactions[asked], self.emojis_asked()), ({renewed: [BOT]}, 2))
+        later, newest = self.fake.say(GENERAL, OWNER, 'again'), 'wimsyaogo:600000000000000005'
+        self.fake.server_emojis[GUILD] = [{'id': newest.split(':')[1], 'name': aw.WIMSY}]  # with no event this time
+        said = self.error('discord_react', channel=GENERAL, message=later, emoji=OWNERS)
+        quoted = urllib.parse.quote(renewed)
+        self.assertEqual(
+            said,
+            f'Discord answered 400 to PUT /channels/{GENERAL}/messages/{later}/reactions/{quoted}/@me: Unknown Emoji '
+            '(code 10014)',
+        )
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=later, emoji=OWNERS)['status'], 'reacted')
+        self.assertEqual((self.fake.reactions[later], self.emojis_asked()), ({newest: [BOT]}, 3))
+
+    def test_discords_refusal_shows_with_its_status_and_message(self):
+        asked = self.fake.say(GENERAL, OWNER, 'hi')
+        path = f'/channels/{GENERAL}/messages/{asked}/reactions/{EYES}/@me'
+        self.fake.fail[('PUT', path)] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=EYES)
+        quoted = urllib.parse.quote(EYES)
+        self.assertEqual(
+            said,
+            f'Discord answered 403 to PUT /channels/{GENERAL}/messages/{asked}/reactions/{quoted}/@me: Missing '
+            'Permissions (code 50013)',
+        )
+        self.assertEqual(self.logs, [f'discord_react failed: {said}'])
+        gone = '1500000000000000099'
+        said = self.error('discord_react', channel=GENERAL, message=gone, emoji=EYES)
+        self.assertEqual(
+            said, f'Discord answered 404 to GET /channels/{GENERAL}/messages/{gone}: Unknown Message (code 10008)'
+        )
+
+    def test_arguments_are_checked_before_discord_hears_of_them(self):
+        asked = '1500000000000000001'
+        self.assertEqual(self.error('discord_react', channel=GENERAL, message=asked), 'discord_react needs emoji')
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=EYES, text='hi')
+        self.assertEqual(said, 'discord_react has no argument "text"; it takes channel, message, emoji')
+        said = self.error('discord_unreact', channel=GENERAL, message='abc', emoji=EYES)
+        self.assertEqual(said, 'message is "abc", not a Discord id (17 to 20 digits)')
+        said = self.error('discord_unreact', channel=int(GENERAL), message=asked, emoji=EYES)
+        self.assertIn('channel is 300000000000000001, not a Discord id: write it as a string', said)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_the_tools_and_the_instructions_say_which_reactions_and_when(self):
+        tools = {tool['name']: tool for tool in aw.tool_list(aw.AOGO)}
+        self.assertEqual(list(tools), list(aw.TOOL_NAMES))
+        quick = [
+            ':wimsyaogo_eyes:',
+            ':wimsyaogo_done:',
+            ':wimsyaogo_thumbsup:',
+            ':wimsyaogo_no:',
+            EYES,
+            YES,
+            THUMBS,
+            NO,
+        ]
+        for name in ('discord_react', 'discord_unreact'):
+            emoji = tools[name]['inputSchema']['properties']['emoji']
+            self.assertEqual(emoji['enum'], [*quick, ':wimsyaogo:'])
+            self.assertEqual(tools[name]['inputSchema']['required'], ['channel', 'message', 'emoji'])
+        self.assertEqual(tools['discord_quick']['inputSchema']['properties']['emoji']['enum'], quick)
+        self.assertEqual(tools['discord_quick']['inputSchema']['required'], ['channel', 'reply_to', 'emoji'])
+        names = tools['discord_emoji_upload']['inputSchema']['properties']['name']['enum']
+        self.assertEqual(names, ['wimsyaogo_eyes', 'wimsyaogo_done', 'wimsyaogo_thumbsup', 'wimsyaogo_no'])
+        meanings = (
+            f':wimsyaogo_eyes: or {EYES} (seen, on it); :wimsyaogo_done: or {YES} (done); :wimsyaogo_thumbsup: or '
+            f'{THUMBS} (agreed); :wimsyaogo_no: or {NO} (cannot)'
+        )
+        for name in ('discord_react', 'discord_quick'):
+            self.assertIn(meanings, tools[name]['description'])
+        said = aw.instructions(self.settings)
+        self.assertIn(
+            "react to it with discord_react instead of posting, the server's emoji first, its unicode one only while "
+            f"that is not uploaded: {meanings}; and :wimsyaogo:, the owner's emoji",
+            said,
+        )
+        self.assertIn(
+            'put :wimsyaogo_eyes: when you start on a message and, once done, take it off with discord_unreact and '
+            'put :wimsyaogo_done:',
+            said,
+        )
+        self.assertIn("AogoWimsy's own :wimsyaogo: lets nothing through: only the owner's does", said)
+        self.assertIn('a quick reply, use discord_quick: it posts at once, with no draft, and takes no text', said)
+
+
+class Drawn(WithDiscord):
+    """the server's custom emojis drawn for the bot's answers: found by name, a missing one named with its unicode"""
+
+    def test_each_drawn_emoji_goes_by_the_servers_one_of_its_name_and_comes_off(self):
+        self.fake.upload(*aw.DRAWN)
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        for name in aw.DRAWN:
+            with self.subTest(name=name):
+                got = self.tool('discord_react', channel=GENERAL, message=asked, emoji=f':{name}:')
+                self.assertEqual(got['status'], 'reacted')
+                self.assertEqual(self.fake.reactions[asked][f'{name}:{DRAWN_IDS[name]}'], [BOT])
+        self.assertEqual(len(self.fake.posts('GET', f'/guilds/{GUILD}/emojis')), 1)  # hits from the first answer
+        gone = self.tool('discord_unreact', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(gone['status'], 'removed')
+        self.assertNotIn(f'wimsyaogo_eyes:{DRAWN_IDS["wimsyaogo_eyes"]}', self.fake.reactions[asked])
+        said = f'discord_react: reacted, :wimsyaogo_done: of AogoWimsy on message {asked} in channel {GENERAL}'
+        self.assertIn(said, self.logs)
+
+    def test_one_not_uploaded_yet_is_refused_naming_it_and_its_unicode_and_found_once_it_is(self):
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(
+            said,
+            f'no server AogoWimsy is in has an emoji named wimsyaogo_eyes (it looked in {GUILD}): it is not uploaded '
+            f'yet (discord_emoji_upload uploads it); {EYES} says the same',
+        )
+        self.assertEqual(self.fake.reactions, {})
+        self.fake.upload('wimsyaogo_eyes')  # no gateway event: the miss is asked again
+        self.assertEqual(
+            self.tool('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')['status'], 'reacted'
+        )
+        self.assertEqual(self.fake.reactions[asked], {f'wimsyaogo_eyes:{DRAWN_IDS["wimsyaogo_eyes"]}': [BOT]})
+
+
+class Quick(WithDiscord):
+    """discord_quick: a reply of one emoji alone, posted at once; a text never"""
+
+    def test_one_emoji_alone_posts_at_once_replying_pinging_no_one_with_no_draft(self):
+        self.fake.upload(*aw.DRAWN)
+        asked = self.fake.say(GENERAL, OWNER, 'is it merged?')
+        got = self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_done:')
+        posted = self.fake.last(GENERAL)
+        link = f'https://discord.com/channels/{GUILD}/{GENERAL}/{posted["id"]}'
+        want = {'status': 'posted', 'link': link, 'message': posted['id'], 'channel': GENERAL, 'reply_to': asked}
+        self.assertEqual(got, dict(want, emoji=':wimsyaogo_done:'))
+        self.assertEqual(posted['content'], f'<:wimsyaogo_done:{DRAWN_IDS["wimsyaogo_done"]}>')
+        body = self.fake.posts('POST', f'/channels/{GENERAL}/messages')[0][3]
+        self.assertEqual(body['allowed_mentions'], {'parse': [], 'replied_user': False})
+        reference = {'message_id': asked, 'channel_id': GENERAL, 'fail_if_not_exists': True}
+        self.assertEqual(body['message_reference'], reference)
+        self.assertEqual((self.fake.messages[DM], self.clock.waits), ([], []))  # no draft, no wait
+        said = f'discord_quick: posted, :wimsyaogo_done: of AogoWimsy as message {posted["id"]} replying to {asked} '
+        self.assertEqual(self.logs, [said + f'in channel {GENERAL}', 'discord_quick: posted'])
+        plain = self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=THUMBS)
+        self.assertEqual((plain['status'], self.fake.last(GENERAL)['content']), ('posted', THUMBS))
+        self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(len(self.fake.posts('GET', f'/guilds/{GUILD}/emojis')), 2)  # asked at each custom one
+
+    def test_a_text_or_any_other_emoji_is_refused_and_nothing_is_posted(self):
+        asked = self.fake.say(GENERAL, OWNER, 'is it merged?')
+        taken = (
+            "not one AogoWimsy posts alone; a text goes through discord_post and the owner's "
+            f'{YES}: it takes {CUSTOM}, {EYES}, {YES}, {THUMBS}, {NO}'
+        )
+        for emoji, said in (
+            ('done, merged', f'emoji is "done, merged", {taken}'),
+            (
+                f'{YES} merged',
+                f'emoji is "{YES} merged" (U+2705 U+0020 U+006D U+0065 U+0072 U+0067 U+0065 U+0064), {taken}',
+            ),
+            (OWNERS, f'emoji is ":wimsyaogo:", {taken}'),
+            (f'{EYES}{EYES}', f'emoji is "{EYES}{EYES}" (U+1F440 U+1F440), {taken}'),
+        ):
+            with self.subTest(emoji=emoji):
+                self.assertEqual(self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=emoji), said)
+        said = self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=YES, text='merged')
+        self.assertEqual(said, 'discord_quick has no argument "text"; it takes channel, reply_to, emoji')
+        self.assertEqual(self.error('discord_quick', channel=GENERAL, emoji=YES), 'discord_quick needs reply_to')
+        self.assertEqual(self.fake.requests, [])
+        self.assertEqual(len(self.fake.messages[GENERAL]), 1)
+
+    def test_a_channel_it_may_not_post_in_a_strangers_message_a_draft_and_a_missing_emoji_post_nothing(self):
+        elsewhere = self.fake.say(OTHER, OWNER, 'elsewhere')
+        said = self.error('discord_quick', channel=OTHER, reply_to=elsewhere, emoji=YES)
+        self.assertIn(f'channel {OTHER} is not one AogoWimsy may post in: AOGOWIMSY_CHANNELS lists', said)
+        theirs = self.fake.say(GENERAL, STRANGER, 'a secret of the stranger', mentions=[BOT])
+        said = self.error('discord_quick', channel=GENERAL, reply_to=theirs, emoji=YES)
+        self.assertIn(f'message {theirs} is not one AogoWimsy gives', said)
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        said = self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_no:')
+        self.assertIn(f'emoji named wimsyaogo_no (it looked in {GUILD}): it is not uploaded yet', said)
+        self.assertIn(f'{NO} says the same', said)
+        in_dm = self.fake.say(DM, OWNER, 'in the DMs')  # read there, but posted in only as discord_post does
+        said = self.error('discord_quick', channel=DM, reply_to=in_dm, emoji=YES)
+        self.assertIn(f'channel {DM} is not one AogoWimsy may post in', said)
+        draft = self.tool('discord_post', channel=GENERAL, text='hello', wait=0)['draft']
+        self.bot.settings = self.settings._replace(channels=None)  # the owner's DMs are a channel to post in now
+        said = self.error('discord_quick', channel=DM, reply_to=draft, emoji=YES)
+        self.assertIn(f"message {draft} is a draft of AogoWimsy's", said)
+        self.assertEqual([len(self.fake.messages[c]) for c in (OTHER, GENERAL, DM)], [1, 2, 2])
+
+
+class EmojiUpload(WithDiscord):
+    """discord_emoji_upload: one of the four drawn emojis, from its fixed file, by its name"""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory(prefix='aogowimsy-emoji-')
+        self.addCleanup(folder.cleanup)
+        self.bot.drawings = Path(folder.name)
+        for name in aw.DRAWN:
+            (self.bot.drawings / f'{name}.png').write_bytes(PNG_EMOJI + name.encode())
+
+    def call(self, **args):
+        """discord_emoji_upload's result: its argument name is one tool() and error() take for the tool's"""
+        params = {'name': 'discord_emoji_upload', 'arguments': args}
+        return self.server.handle({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': params})['result']
+
+    def uploads(self, **args):
+        result = self.call(**args)
+        self.assertFalse(result['isError'], result['content'][0]['text'])
+        return json.loads(result['content'][0]['text'])
+
+    def refused(self, **args):
+        result = self.call(**args)
+        self.assertTrue(result['isError'], result['content'][0]['text'])
+        return result['content'][0]['text']
+
+    def test_it_uploads_the_png_as_a_data_uri_by_its_name_and_reacts_with_it_at_once(self):
+        got = self.uploads(guild=GUILD, name='wimsyaogo_eyes')
+        eyes = DRAWN_IDS['wimsyaogo_eyes']
+        self.assertEqual(got, {'status': 'uploaded', 'guild': GUILD, 'name': 'wimsyaogo_eyes', 'id': eyes})
+        body = self.fake.posts('POST', f'/guilds/{GUILD}/emojis')[0][3]
+        image = 'data:image/png;base64,' + base64.b64encode(PNG_EMOJI + b'wimsyaogo_eyes').decode()
+        self.assertEqual(body, {'name': 'wimsyaogo_eyes', 'image': image})
+        self.assertEqual(
+            self.logs[0],
+            f'discord_emoji_upload: uploaded, wimsyaogo_eyes of AogoWimsy as emoji {eyes} in server {GUILD}',
+        )
+        asked = self.fake.say(GENERAL, OWNER, 'merged?')
+        self.tool('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertEqual(self.fake.reactions[asked], {f'wimsyaogo_eyes:{eyes}': [BOT]})
+        self.assertEqual(len(self.fake.posts('GET', f'/guilds/{GUILD}/emojis')), 1)  # the upload's own answer
+
+    def test_one_already_there_is_not_uploaded_again(self):
+        self.fake.upload('wimsyaogo_done')
+        got = self.uploads(guild=GUILD, name='wimsyaogo_done')
+        self.assertEqual(
+            got,
+            {'status': 'already there', 'guild': GUILD, 'name': 'wimsyaogo_done', 'id': DRAWN_IDS['wimsyaogo_done']},
+        )
+        self.assertFalse(self.fake.posts('POST', f'/guilds/{GUILD}/emojis'))
+        (self.bot.drawings / 'wimsyaogo_done.png').unlink()  # the file is not needed for one already there
+        self.assertEqual(self.uploads(guild=GUILD, name='wimsyaogo_done')['status'], 'already there')
+
+    def test_without_create_expressions_the_error_names_it_and_the_invite_with_it(self):
+        self.fake.fail[('POST', f'/guilds/{GUILD}/emojis')] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        said = self.refused(guild=GUILD, name='wimsyaogo_no')
+        self.assertEqual(274878008384 + (1 << 43), 9070971030592)
+        self.assertEqual(
+            said,
+            f'Discord answered 403 to POST /guilds/{GUILD}/emojis: Missing Permissions (code 50013): AogoWimsy needs '
+            f'Create Expressions (8796093022208) in server {GUILD}; give its role that permission (Server Settings, '
+            'Roles), or invite it again with permissions=9070971030592',
+        )
+        self.fake.fail[('POST', f'/guilds/{GUILD}/emojis')] = (403, {'message': 'Missing Access', 'code': 50001})
+        said = self.refused(guild=GUILD, name='wimsyaogo_no')
+        self.assertEqual(said, f'Discord answered 403 to POST /guilds/{GUILD}/emojis: Missing Access (code 50001)')
+
+    def test_the_invite_carries_attach_files_which_a_post_with_images_needs(self):
+        self.assertEqual(aw.ATTACH_FILES, 1 << 15)
+        self.assertEqual(aw.INVITE, 274878008384)
+        self.assertEqual(aw.INVITE & aw.ATTACH_FILES, aw.ATTACH_FILES)
+
+    def test_only_the_four_names_each_from_its_own_png_and_no_path(self):
+        for name in ('wimsyaogo', 'wimsyaogo_eyes.png', '../wimsyaogo_eyes', '/etc/passwd', ':wimsyaogo_eyes:', 5):
+            with self.subTest(name=name):
+                said = self.refused(guild=GUILD, name=name)
+                self.assertEqual(
+                    said,
+                    f'name is {aw.shown(name)}, not one AogoWimsy uploads: it takes wimsyaogo_eyes, wimsyaogo_done, '
+                    f'wimsyaogo_thumbsup, wimsyaogo_no, each from {self.bot.drawings}/<name>.png',
+                )
+        said = self.refused(guild=GUILD, name='wimsyaogo_eyes', path='/tmp/x.png')
+        self.assertEqual(said, 'discord_emoji_upload has no argument "path"; it takes guild, name')
+        self.assertEqual(self.fake.requests, [])
+        folder = self.bot.drawings
+        (folder / 'wimsyaogo_eyes.png').unlink()
+        (folder / 'wimsyaogo_done.png').write_bytes(b'GIF89a not a png')
+        (folder / 'wimsyaogo_no.png').write_bytes(PNG_EMOJI + b'x' * aw.MOST_EMOJI)
+        said = self.refused(guild=GUILD, name='wimsyaogo_eyes')
+        self.assertIn(f'{folder}/wimsyaogo_eyes.png cannot be read (No such file or directory)', said)
+        said = self.refused(guild=GUILD, name='wimsyaogo_done')
+        self.assertEqual(said, f'{folder}/wimsyaogo_done.png is not a PNG: wimsyaogo_done is uploaded from a PNG')
+        said = self.refused(guild=GUILD, name='wimsyaogo_no')
+        size = len(PNG_EMOJI) + aw.MOST_EMOJI
+        self.assertEqual(said, f'{folder}/wimsyaogo_no.png has {size} bytes: an emoji takes 262144 at most')
+        self.assertFalse(self.fake.posts('POST', f'/guilds/{GUILD}/emojis'))
+        said = self.refused(guild='200000000000000099', name='wimsyaogo_thumbsup')
+        self.assertEqual(
+            said, 'Discord answered 404 to GET /guilds/200000000000000099/emojis: Unknown Guild (code 10004)'
+        )
+
+    def test_its_folder_is_the_owners_wimsy_dist_clone(self):
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        self.assertEqual(fresh.drawings, Path.home() / 'WorkDir/ScarletNX/wimsy-dist/emoji')
+
+
 class SavesFolder(unittest.TestCase):
     def test_xdg_cache_home_when_absolute_else_the_home_cache(self):
         home = Path.home() / '.cache' / 'aogowimsy'
@@ -989,6 +1587,12 @@ class SavesFolder(unittest.TestCase):
         self.assertEqual(aw.saves_folder('aogowimsy', {'XDG_CACHE_HOME': 'relative/c'}), home)
         self.assertEqual(aw.saves_folder('aogowimsy', {'XDG_CACHE_HOME': ''}), home)
         self.assertEqual(aw.saves_folder('aogowimsy', {}), home)
+
+    def test_the_greetings_state_is_xdg_state_home_when_absolute_else_the_home_one(self):
+        home = Path.home() / '.local' / 'state' / 'aogowimsy'
+        self.assertEqual(aw.state_folder('aogowimsy', {'XDG_STATE_HOME': '/var/tmp/s'}), Path('/var/tmp/s/aogowimsy'))
+        self.assertEqual(aw.state_folder('aogowimsy', {'XDG_STATE_HOME': 'relative/s'}), home)
+        self.assertEqual(aw.state_folder('aogowimsy', {}), home)
 
     def test_a_long_name_keeps_its_suffix_within_200_bytes(self):
         name = aw.file_name('é' * 300 + '.png', 'fallback')
@@ -1198,17 +1802,18 @@ class Protocol(WithDiscord):
         self.assertEqual([n['params']['progress'] for n in self.sent], [1.0, 2.0])
 
 
-class Channels(WithDiscord):
-    """what the gateway hears and what reaches the session as a channel event"""
+class Hearing(WithDiscord):
+    """an ear on the gateway's events, after READY and the server's GUILD_CREATE"""
 
     def setUp(self):
         super().setUp()
         self.pushes = []
         self.ear = aw.Ear(self.bot, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
-        self.ear.hear('READY', {'user': {'id': BOT}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'})
+        self.ear.hear('READY', READY)
         guild = {'id': GUILD, 'channels': [self.fake.channels[c] for c in (GENERAL, HELP, OTHER)]}
         guild['threads'] = [self.fake.channels[THREAD], self.fake.channels[OTHER_THREAD]]
-        self.ear.hear('GUILD_CREATE', guild)
+        self.ear.hear('GUILD_CREATE', guild)  # which registers /aogo there
+        self.logs.clear()
 
     def heard(self, channel, author, content='', **extra):
         number = self.fake.say(channel, author, content, **extra)
@@ -1222,6 +1827,10 @@ class Channels(WithDiscord):
         if self.fake.channels[channel].get('guild_id'):
             event['guild_id'] = self.fake.channels[channel]['guild_id']
         self.ear.hear('MESSAGE_REACTION_ADD', dict(event, emoji={'id': number or None, 'name': name}))
+
+
+class Channels(Hearing):
+    """what the gateway hears and what reaches the session as a channel event"""
 
     def test_the_owners_answer_to_a_draft_posts_it_at_once_with_no_tool_waiting(self):
         draft = self.tool('discord_post', channel=GENERAL, text='approved later', wait=0)['draft']
@@ -1432,6 +2041,668 @@ class Channels(WithDiscord):
         stop.set()
         thread.join(5)
         self.assertFalse(thread.is_alive())
+
+
+class Greet(Hearing):
+    """a stranger who calls AogoWimsy gets the fixed line at once, within its limits, and the session hears nothing"""
+
+    CALL = '<@1000000000000000001> who is this?'
+
+    def setUp(self):
+        super().setUp()
+        self.start = self.now = 1_800_000_000.0
+        self.bot.store.now = lambda: self.now
+
+    def greetings(self, channel=GENERAL):
+        """what AogoWimsy posted in a channel: the bodies of its POSTs"""
+        return [body for _, _, _, body in self.fake.posts('POST', f'/channels/{channel}/messages')]
+
+    def answered(self, channel=GENERAL):
+        """the messages each greeting in a channel replies to"""
+        return [body['message_reference']['message_id'] for body in self.greetings(channel)]
+
+    def call(self, who=STRANGER, channel=GENERAL):
+        return self.heard(channel, who, self.CALL, mentions=[BOT])
+
+    def counted(self, why, channel=GENERAL):
+        return f"greet: a stranger's call in channel {channel} is only counted: {why}"
+
+    def restarted(self, now):
+        """another server of the bot, as after a restart or in another session: the same state folder"""
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        fresh.store.now = lambda: now
+        ear = aw.Ear(fresh, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
+        ear.hear('READY', READY)
+        return ear
+
+    def test_a_strangers_mention_gets_the_line_at_once_as_a_reply_pinging_the_owner_alone(self):
+        number = self.call()
+        reference = {'message_id': number, 'channel_id': GENERAL, 'fail_if_not_exists': True}
+        self.assertEqual(
+            self.greetings(), [{'content': LINE, 'allowed_mentions': PINGS, 'message_reference': reference}]
+        )
+        posted = self.fake.last(GENERAL)
+        self.assertEqual((posted['author'], posted['message_reference']['message_id']), (BOT, number))
+        self.assertEqual(self.pushes, [])  # the session hears nothing of it
+        self.assertEqual((self.fake.messages[DM], self.fake.posts('POST', '/users/@me/channels')), ([], []))  # no DM
+        said = f"greet: posted message {posted['id']} replying to a stranger's call in channel {GENERAL} (1 of 10 "
+        self.assertEqual([line for line in self.logs if line.startswith('greet')], [said + 'in the last hour)'])
+        role = self.heard(HELP, OTHER_PERSON, f'<@&{BOT_ROLE}> and you?', mention_roles=[BOT_ROLE])
+        self.assertEqual(self.answered(HELP), [role])  # its role, as Discord's autocomplete picks it, calls it too
+        self.assertNotIn(STRANGER, ' '.join(self.logs))
+        self.assertNotIn('who is this', ' '.join(self.logs))
+
+    def test_a_reply_to_one_of_its_messages_calls_it_in_a_listed_channel_or_its_thread(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        theirs = self.fake.say(GENERAL, FRIEND, 'a post of a friend')
+        self.heard(GENERAL, OTHER_PERSON, 'answering the friend', reply_to=theirs)
+        self.assertEqual(self.greetings(), [])
+        number = self.heard(GENERAL, STRANGER, 'what is this bot?', reply_to=mine)
+        self.assertEqual(
+            [(body['content'], body['message_reference']['message_id']) for body in self.greetings()], [(LINE, number)]
+        )
+        in_thread = self.call(OTHER_PERSON, THREAD)
+        self.assertEqual(self.answered(THREAD), [in_thread])
+        self.assertEqual(self.pushes, [])
+
+    def test_a_second_call_within_24_hours_is_only_counted_and_one_after_them_is_greeted(self):
+        before = self.fake.say(GENERAL, FRIEND, 'before')
+        first = self.call()
+        greeting = self.fake.last(GENERAL)['id']
+        self.now += 23 * 3600 + 59 * 60 + 59
+        self.heard(GENERAL, STRANGER, 'thanks', reply_to=greeting)  # a reply to the greeting calls it too: no loop
+        self.call()
+        self.assertEqual(self.answered(), [first])
+        late = self.counted('the caller was greeted 23 h 59 min ago: once each 24 h')
+        self.assertEqual([line for line in self.logs if 'only counted' in line], [late, late])
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        self.assertEqual([m['author_id'] for m in got['messages']], [BOT])  # its greeting; the calls are counted
+        self.assertEqual(got['left_out'], 3)
+        self.now += 2
+        again = self.call()
+        self.assertEqual(self.answered(), [first, again])
+        self.assertEqual(self.pushes, [])
+
+    def test_the_eleventh_stranger_within_an_hour_is_only_counted_and_the_hour_rolls_on(self):
+        called = []
+        for caller in CALLERS[:11]:
+            called.append(self.call(caller))
+            self.now += 300  # five minutes apart: the eleventh at 50 minutes
+        self.assertEqual(self.answered(), called[:10])
+        self.assertEqual(self.logs[-1], self.counted('10 greetings in the last hour: 10 at most'))
+        self.now = self.start + 3601  # the first greeting is over an hour old
+        late = self.call(CALLERS[11])
+        self.assertEqual(self.answered(), called[:10] + [late])
+        self.assertTrue(self.logs[-1].endswith('(10 of 10 in the last hour)'), self.logs[-1])
+        self.assertEqual(self.pushes, [])
+
+    def test_the_owner_and_listed_users_reach_the_session_and_get_no_greeting(self):
+        self.call(OWNER)
+        self.call(FRIEND)
+        self.assertEqual([(text, meta['kind']) for text, meta in self.pushes], [(self.CALL, 'message')] * 2)
+        self.assertEqual(self.greetings(), [])
+        self.assertFalse((self.state / 'greetings.json').exists())
+
+    def test_the_owners_wimsy_still_lets_a_greeted_call_through_to_the_session(self):
+        number = self.call()
+        self.assertEqual(self.answered(), [number])
+        self.reacted(GENERAL, number, WIMSY, OWNER)
+        meta = {'kind': 'approved', 'author': 'Stranger', 'author_id': STRANGER, 'channel': GENERAL}
+        self.assertEqual(self.pushes, [(self.CALL, dict(meta, message_id=number))])
+        got = self.tool('discord_read', channel=GENERAL)
+        self.assertEqual([(m['id'], m['approved']) for m in got['messages']], [(number, True), (got['after'], False)])
+        self.assertEqual(self.answered(), [number])  # greeted once
+
+    def test_a_restart_keeps_the_limits_in_a_private_file(self):
+        callers = [STRANGER] + CALLERS[:9]
+        for caller in callers:
+            self.call(caller)
+        self.assertEqual(len(self.greetings()), 10)
+        path = self.state / 'greetings.json'
+        self.assertEqual(json.loads(path.read_text()), {'greetings': [[self.now, caller] for caller in callers]})
+        modes = stat.S_IMODE(path.stat().st_mode), stat.S_IMODE(self.state.stat().st_mode)
+        self.assertEqual(modes, (0o600, 0o700))
+        self.ear = self.restarted(self.now + 1800)
+        self.call()  # once each 24 h, across the restart
+        self.call(OTHER_PERSON)  # and the eleventh within the hour
+        self.assertEqual(len(self.greetings()), 10)
+        said = [self.counted('the caller was greeted 0 h 30 min ago: once each 24 h')]
+        said.append(self.counted('10 greetings in the last hour: 10 at most'))
+        self.assertEqual(self.logs[-2:], said)
+        self.ear = self.restarted(self.now + 25 * 3600)  # a day on, the file still holds the old greetings
+        self.call()
+        self.assertEqual(len(self.greetings()), 11)
+        self.assertEqual(json.loads(path.read_text()), {'greetings': [[self.now + 25 * 3600, STRANGER]]})
+
+    def test_two_servers_hearing_one_call_greet_it_once(self):
+        other = self.restarted(self.now)  # another session's server, on the same gateway events
+        number = self.fake.say(GENERAL, STRANGER, self.CALL, mentions=[BOT])
+        for ear in (self.ear, other):
+            ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        self.assertEqual(self.answered(), [number])
+        self.assertEqual(self.logs[-1], self.counted('the caller was greeted 0 h 00 min ago: once each 24 h'))
+
+    def test_a_look_waits_while_another_server_holds_the_lock(self):
+        aw.private_folder(self.state)
+        held = os.open(self.state / aw.STATE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        got = []
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            looking = aw.started(lambda: got.append(self.bot.limit('greetings', STRANGER)))
+            looking.join(0.3)
+            self.assertTrue(looking.is_alive())  # waiting for the other server's look to end
+            self.assertEqual(got, [])
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+        looking.join(5)
+        self.assertEqual(got, [(None, 1)])
+
+    def test_what_is_not_a_strangers_call_where_it_reads_gets_nothing(self):
+        mine = self.fake.say(GENERAL, BOT, 'a post of mine')
+        self.heard(GENERAL, STRANGER, 'talking to the room')
+        self.heard(GENERAL, STRANGER, 'naming someone', mentions=[FRIEND])
+        self.heard(GENERAL, STRANGER, '@everyone look', mention_everyone=True)
+        self.heard(GENERAL, STRANGER, 'another bot, a plain role', mention_roles=[OTHER_BOT_ROLE, HELPERS_ROLE])
+        self.call(STRANGER, OTHER)  # a channel not listed
+        self.call(STRANGER, OTHER_THREAD)  # a thread of one not listed
+        self.call(OTHER_BOT)  # a bot: two bots would greet each other
+        self.heard(GENERAL, OTHER_BOT, 'its answer', reply_to=mine)
+        self.heard(GENERAL, CALLERS[0], self.CALL, mentions=[BOT], webhook_id='800000000000000001')
+        self.heard(STRANGER_DM, STRANGER, 'in DMs, to aogo')
+        for channel in (GENERAL, OTHER, OTHER_THREAD, STRANGER_DM):
+            self.assertEqual(self.greetings(channel), [])
+        self.assertEqual([meta['kind'] for _, meta in self.pushes], ['dm'])  # a stranger's DM: its name, as before
+        self.assertFalse((self.state / 'greetings.json').exists())
+
+    def test_a_greeting_discord_refuses_is_an_error_to_the_session_and_counts(self):
+        route = ('POST', f'/channels/{GENERAL}/messages')
+        self.fake.fail[route] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        self.call()
+        said = (
+            f'AogoWimsy could not greet a stranger who called it in channel {GENERAL}: Discord answered 403 to POST '
+            f'/channels/{GENERAL}/messages: Missing Permissions (code 50013); the call counts toward the limits'
+        )
+        self.assertEqual(self.pushes, [(said, {'kind': 'error'})])
+        del self.fake.fail[route]
+        self.call()
+        self.assertEqual([m for m in self.fake.messages[GENERAL] if m['author'] == BOT], [])
+        self.assertEqual(self.logs[-1], self.counted('the caller was greeted 0 h 00 min ago: once each 24 h'))
+
+    def test_a_greetings_file_it_cannot_read_stops_the_greetings_says_so_and_stays(self):
+        aw.private_folder(self.state)
+        path = self.state / 'greetings.json'
+        cases = (
+            ('{"greetings": [[1, "x"]', 'is not JSON (Expecting'),
+            ('[]', 'holds [], not {"greetings": [[time, person id], ...]}'),
+            (json.dumps({'greetings': [[True, STRANGER]]}), f': item 1 is [true, "{STRANGER}"], not [time, person id]'),
+            (json.dumps({'greetings': [[1, 'someone']]}), ': item 1 is [1, "someone"], not [time, person id]'),
+        )
+        for text, why in cases:
+            path.write_text(text)
+            self.pushes.clear()
+            self.call()
+            [(said, meta)] = self.pushes
+            self.assertEqual(meta, {'kind': 'error'})
+            self.assertIn(f'could not greet a stranger who called it in channel {GENERAL}: {path}', said)
+            self.assertIn(why, said)
+            self.assertTrue(said.endswith(': no stranger is greeted until it is mended or removed'), said)
+            self.assertEqual(path.read_text(), text)  # left for the owner to see
+        self.assertEqual(self.greetings(), [])
+        path.unlink()
+        number = self.call()
+        self.assertEqual(self.answered(), [number])
+
+    def test_greet_per_hour_0_greets_no_one_and_greet_hours_sets_the_wait(self):
+        self.bot.settings = self.settings._replace(greet_per_hour=0)
+        self.call()
+        self.assertEqual(self.greetings(), [])
+        self.assertEqual(self.logs[-1], self.counted('AOGOWIMSY_GREET_PER_HOUR is 0'))
+        self.assertFalse(self.state.exists())
+        self.bot.settings = self.settings._replace(greet_hours=1)
+        first = self.call()
+        self.now += 1800
+        self.call()
+        self.assertEqual(self.logs[-1], self.counted('the caller was greeted 0 h 30 min ago: once each 1 h'))
+        self.now += 1801
+        again = self.call()
+        self.assertEqual(self.answered(), [first, again])
+
+    def test_the_instructions_tell_the_session_of_the_greeting_and_its_limits(self):
+        said = aw.instructions(self.settings)
+        self.assertIn(
+            f'gets at once, with no draft and no {YES}, a reply from the server itself that pings the owner alone: '
+            f'"{LINE}". Once a person each 24 h, and 10 an hour at most, everyone together; past that the call is only '
+            "counted. You are told nothing of the call; the owner's :wimsyaogo: on it still lets it through to you",
+            said,
+        )
+        others = aw.instructions(self.settings._replace(greet_hours=48, greet_per_hour=3))
+        self.assertIn('Once a person each 48 h, and 3 an hour at most', others)
+        none = aw.instructions(self.settings._replace(greet_per_hour=0))
+        self.assertIn('AogoWimsy greets no stranger who calls it (AOGOWIMSY_GREET_PER_HOUR is 0)', none)
+        self.assertNotIn(LINE, none)
+
+
+HELP_TEXT = f'To ask me something, mention <@{BOT}> with what you need; DraVee lets it through.'
+OWNERS_HELP = (
+    'Yours alone:\n'
+    '/aogo allow user [time]: their messages to me reach the session; time 2h, 1d, 7d or perm, 1d without one\n'
+    '/aogo deny user: takes their allow back\n'
+    '/aogo allowed: who is allowed, and until when'
+)
+# /aogo as AogoWimsy registers it, word for word
+AOGO_COMMAND = {
+    'type': 1,
+    'name': 'aogo',
+    'description': "Aogo, DraVee's AI assistant on ScarletNX",
+    'default_member_permissions': None,
+    'options': [
+        {'type': 1, 'name': 'help', 'description': 'What Aogo is and how to ask it something'},
+        {
+            'type': 1,
+            'name': 'allow',
+            'description': "DraVee only: let someone's messages reach Aogo for a time",
+            'options': [
+                {'type': 6, 'name': 'user', 'description': 'Who to allow', 'required': True},
+                {
+                    'type': 3,
+                    'name': 'time',
+                    'description': 'For how long: 1 day without one',
+                    'choices': [
+                        {'name': '2 hours', 'value': '2h'},
+                        {'name': '1 day', 'value': '1d'},
+                        {'name': '7 days', 'value': '7d'},
+                        {'name': 'permanent', 'value': 'perm'},
+                    ],
+                },
+            ],
+        },
+        {
+            'type': 1,
+            'name': 'deny',
+            'description': "DraVee only: take someone's allow back",
+            'options': [{'type': 6, 'name': 'user', 'description': 'Whose allow to take back', 'required': True}],
+        },
+        {'type': 1, 'name': 'allowed', 'description': 'DraVee only: who is allowed, and until when'},
+    ],
+}
+
+
+class Commands(Hearing):
+    """/aogo: registered in each server, help for anyone, allow, deny and allowed for the owner alone"""
+
+    def setUp(self):
+        super().setUp()
+        self.start = self.now = 1_800_000_000.0
+        self.bot.store.now = lambda: self.now
+
+    def used(self, who, sub, channel=GENERAL, name='aogo', **options):
+        """a use of the command as the gateway brings it"""
+        self.fake.serial += 1
+        number = str(self.fake.serial)
+        values = [
+            {'name': key, 'type': aw.USER_OPTION if key == 'user' else aw.STRING_OPTION, 'value': value}
+            for key, value in options.items()
+        ]
+        data = {'id': '800000000000000000', 'name': name, 'type': 1, 'options': [{'type': 1, 'name': sub}]}
+        if values:
+            data['options'][0]['options'] = values
+        if 'user' in options:
+            user = options['user']
+            data['resolved'] = {'users': {user: self.fake.user(user)}, 'members': {user: {'nick': None}}}
+        return {
+            'id': number,
+            'application_id': APP,
+            'type': aw.APPLICATION_COMMAND,
+            'data': data,
+            'guild_id': GUILD,
+            'channel_id': channel,
+            'member': {'user': self.fake.user(who), 'roles': []},
+            'token': f'token-{number}',
+            'version': 1,
+        }
+
+    def use(self, who, sub, ear=None, **options):
+        """the answer's text a use of the command got, after the ear heard it"""
+        event = self.used(who, sub, **options)
+        (ear or self.ear).hear('INTERACTION_CREATE', event)
+        answer = self.fake.answers[event['id']]
+        self.assertEqual((answer['type'], answer['data']['flags']), (4, 64))  # a message its asker alone sees
+        self.assertEqual(answer['data']['allowed_mentions'], {'parse': []})  # pinging no one
+        return answer['data']['content']
+
+    def restarted(self, now):
+        fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        fresh.store.now = lambda: now
+        ear = aw.Ear(fresh, lambda text, meta: self.pushes.append((text, meta)), threading.Event())
+        ear.hear('READY', READY)
+        return fresh, ear
+
+    def notices(self):
+        return [(text, meta) for text, meta in self.pushes if meta['kind'] == 'notice']
+
+    def test_the_command_is_registered_in_each_server_as_it_is_and_again_only_when_it_differs(self):
+        path = f'/applications/{APP}/guilds/{GUILD}/commands'
+        self.assertEqual([body for _, _, _, body in self.fake.posts('PUT', path)], [[AOGO_COMMAND]])
+        self.assertEqual(aw.command_list(aw.AOGO), [AOGO_COMMAND])
+        self.assertFalse(self.fake.posts('GET', '/applications/@me'))  # READY's application id
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})  # seen again, or another server
+        self.assertEqual((len(self.fake.posts('GET', path)), len(self.fake.posts('PUT', path))), (2, 1))
+        self.assertEqual(self.logs, [f'commands: /aogo (help, allow, deny, allowed) already there in server {GUILD}'])
+        self.fake.commands[GUILD][0]['description'] = 'an older text'
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertEqual(len(self.fake.posts('PUT', path)), 2)
+        self.fake.commands[GUILD].append(dict(self.fake.commands[GUILD][0], name='old', id='800000000000000999'))
+        self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertEqual([command['name'] for command in self.fake.commands[GUILD]], ['aogo'])
+        self.assertEqual(self.logs[-1], f'commands: /aogo (help, allow, deny, allowed) registered in server {GUILD}')
+        self.assertEqual(self.pushes, [])
+
+    def test_a_server_without_the_commands_scope_says_so_with_the_invite_that_gives_it(self):
+        self.fake.guild_ids.append(OTHER_GUILD)
+        self.fake.no_commands_scope.add(OTHER_GUILD)
+        self.ear.hear('GUILD_CREATE', {'id': OTHER_GUILD, 'channels': [], 'threads': []})
+        said = (
+            f'AogoWimsy could not register /aogo in server {OTHER_GUILD}: Discord answered 403 to GET /applications/'
+            f'{APP}/guilds/{OTHER_GUILD}/commands: Missing Access (code 50001): AogoWimsy needs the '
+            f'applications.commands scope in server {OTHER_GUILD} for /aogo; invite it again with '
+            f'https://discord.com/oauth2/authorize?client_id={APP}&scope=bot+applications.commands'
+            '&permissions=9070971030592'
+        )
+        self.assertEqual(self.pushes, [(said, {'kind': 'error'})])
+        self.ear.hear('GUILD_CREATE', {'id': OTHER_GUILD, 'unavailable': True})  # an outage: nothing asked
+        self.assertEqual(len(self.pushes), 1)
+
+    def test_without_readys_application_it_is_asked_once(self):
+        self.bot.known.pop('application')
+        for _ in range(2):
+            self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
+        self.assertEqual(len(self.fake.posts('GET', '/applications/@me')), 1)
+
+    def test_help_answers_anyone_alone_with_the_greetings_line_and_how_to_ask_the_owner_with_his_commands(self):
+        self.assertEqual(self.use(STRANGER, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.assertEqual(self.use(FRIEND, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.assertEqual(self.use(OWNER, 'help'), f'{LINE}\n{HELP_TEXT}\n{OWNERS_HELP}')
+        answers = [r for r in self.fake.requests if r[1].startswith('/interactions/')]
+        self.assertEqual(len(answers), 3)  # answered without the bot's token: the fake refuses one that has it
+        self.assertEqual(self.pushes, [])  # the session hears nothing of a help
+        self.assertEqual(self.logs[-1], f'commands: /aogo help answered in channel {GENERAL}')
+        self.assertNotIn(STRANGER, ' '.join(self.logs))
+        self.assertFalse(any('token-' in line for line in self.logs))
+
+    def test_help_for_a_stranger_keeps_the_greetings_limits_apart_from_the_greeting(self):
+        self.heard(GENERAL, STRANGER, '<@1000000000000000001> hi', mentions=[BOT])  # greeted: help is counted apart
+        self.assertEqual(self.use(STRANGER, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.now += 1800
+        self.assertEqual(self.use(STRANGER, 'help'), 'You asked 0 h 30 min ago: help comes once each 24 h.')
+        for caller in CALLERS[:9]:
+            self.assertEqual(self.use(caller, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.assertEqual(
+            self.use(CALLERS[9], 'help'), 'Help was asked 10 times in the last hour, 10 at most: ask later.'
+        )
+        for _ in range(3):  # the owner and the listed users are never held back
+            self.assertEqual(self.use(OWNER, 'help'), f'{LINE}\n{HELP_TEXT}\n{OWNERS_HELP}')
+            self.assertEqual(self.use(FRIEND, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.now += 24 * 3600
+        self.assertEqual(self.use(STRANGER, 'help'), f'{LINE}\n{HELP_TEXT}')
+        self.bot.settings = self.settings._replace(greet_per_hour=0)
+        self.assertEqual(
+            self.use(CALLERS[10], 'help'), 'AogoWimsy answers no stranger now: AOGOWIMSY_GREET_PER_HOUR is 0.'
+        )
+
+    def test_allow_deny_and_allowed_answer_anyone_but_the_owner_that_they_are_his(self):
+        for who in (STRANGER, FRIEND):
+            self.assertEqual(self.use(who, 'allow', user=OTHER_PERSON), f'Only <@{OWNER}> can use /aogo allow.')
+            self.assertEqual(self.use(who, 'deny', user=OTHER_PERSON), f'Only <@{OWNER}> can use /aogo deny.')
+            self.assertEqual(self.use(who, 'allowed'), f'Only <@{OWNER}> can use /aogo allowed.')
+        self.assertFalse((self.state / 'allowed.json').exists())
+        self.assertEqual(self.pushes, [])
+
+    def test_allow_takes_each_time_and_one_day_without_one_and_refuses_any_other_naming_it(self):
+        for time_value, seconds in (('2h', 7200), ('1d', 86400), ('7d', 604800), (None, 86400)):
+            options = {'user': STRANGER} if time_value is None else {'user': STRANGER, 'time': time_value}
+            said = self.use(OWNER, 'allow', **options)
+            until = int(self.now + seconds)
+            self.assertTrue(
+                said.startswith(f'<@{STRANGER}> is allowed until <t:{until}:f> (<t:{until}:R>): their '), said
+            )
+            self.assertEqual(self.bot.allowed()[STRANGER]['until'], self.now + seconds)
+        said = self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.assertTrue(said.startswith(f'<@{STRANGER}> is allowed for good, until you deny them: their messages'))
+        self.assertIsNone(self.bot.allowed()[STRANGER]['until'])
+        for wrong in ('forever', '3h', ''):
+            said = self.use(OWNER, 'allow', user=OTHER_PERSON, time=wrong)
+            self.assertEqual(said, f'time is "{wrong}", not one of 2h, 1d, 7d, perm: <@{OTHER_PERSON}> is not allowed.')
+        self.assertNotIn(OTHER_PERSON, self.bot.allowed())
+        self.assertEqual(len(self.notices()), 5)  # the five allows, none of the refused
+
+    def test_an_allow_is_told_to_the_session_and_a_new_one_says_the_one_it_replaces(self):
+        said = self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        until = int(self.now + 7200)
+        self.assertEqual(
+            said,
+            f'<@{STRANGER}> is allowed until <t:{until}:f> (<t:{until}:R>): their messages to me reach the session.',
+        )
+        text = (
+            f'The owner allowed Stranger ({STRANGER}) until 2027-01-15T10:00:00Z (2 hours): their messages addressed to '
+            "AogoWimsy reach you as a listed user's do, and discord_allowed lists them."
+        )
+        meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'until': '2027-01-15T10:00:00Z'}
+        self.assertEqual(self.notices(), [(text, meta)])
+        self.assertEqual(aw.utc(self.now + 7200), '2027-01-15T10:00:00Z')
+        said = self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.assertTrue(said.endswith(f'It ran until <t:{until}:f> (<t:{until}:R>) before.'), said)
+        text, meta = self.notices()[-1]
+        self.assertTrue(text.startswith(f'The owner allowed Stranger ({STRANGER}) for good, until he denies them:'))
+        self.assertTrue(text.endswith(' It ran until 2027-01-15T10:00:00Z before.'), text)
+        self.assertEqual(meta['until'], 'permanent')
+        self.assertEqual(self.logs[-1], 'channel: pushed a notice event')
+
+    def test_an_allowed_persons_calls_reach_the_session_as_a_listed_users_until_the_allow_runs_out(self):
+        before = self.fake.say(GENERAL, FRIEND, 'before')
+        self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        self.pushes.clear()
+        number = self.heard(GENERAL, STRANGER, '<@1000000000000000001> can you look?', mentions=[BOT])
+        meta = {'kind': 'message', 'author': 'Stranger', 'author_id': STRANGER, 'channel': GENERAL}
+        self.assertEqual(self.pushes, [('<@1000000000000000001> can you look?', dict(meta, message_id=number))])
+        self.heard(GENERAL, OTHER_PERSON, '<@1000000000000000001> and me?', mentions=[BOT])  # a stranger still
+        self.assertEqual(len(self.pushes), 1)
+        self.assertEqual(len(self.fake.posts('POST', f'/channels/{GENERAL}/messages')), 1)  # its greeting alone
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        self.assertIn(number, [m['id'] for m in got['messages']])
+        self.assertEqual(
+            self.tool('discord_read', channel=GENERAL, after=before, **{'from': [STRANGER]})['messages'][0]['id'],
+            number,
+        )
+        self.now += 7200  # it runs out: nothing is said to them, and they are a stranger again
+        self.pushes.clear()
+        self.heard(GENERAL, STRANGER, '<@1000000000000000001> still there?', mentions=[BOT])
+        self.assertEqual(self.pushes, [])
+        self.assertNotIn(
+            number, [m['id'] for m in self.tool('discord_read', channel=GENERAL, after=before)['messages']]
+        )
+        self.assertIn('nor one he allowed', self.error('discord_read', channel=GENERAL, **{'from': [STRANGER]}))
+        bodies = [body for _, _, _, body in self.fake.posts('POST', f'/channels/{GENERAL}/messages')]
+        self.assertEqual([body['content'] for body in bodies], [LINE, LINE])  # a stranger's call is greeted again
+
+    def test_an_allowed_persons_message_ends_a_wait_and_their_dm_reaches_the_session(self):
+        self.use(OWNER, 'allow', user=STRANGER)
+        after = self.fake.say(GENERAL, OWNER, 'start')
+        self.clock.at(1, lambda: self.arrive(GENERAL, STRANGER, 'here'))
+        got = self.tool('discord_wait', channel=GENERAL, after=after, wait=10)
+        self.assertEqual(got['message']['author_id'], STRANGER)
+        self.pushes.clear()
+        self.heard(STRANGER_DM, STRANGER, 'in DMs')
+        self.assertEqual([(text, meta['kind']) for text, meta in self.pushes], [('in DMs', 'message')])
+
+    def test_deny_takes_an_allow_back_says_so_and_refuses_what_it_cannot_take(self):
+        self.use(OWNER, 'allow', user=STRANGER, time='7d')
+        until = int(self.now + 604800)
+        self.now += 60
+        said = self.use(OWNER, 'deny', user=STRANGER)
+        self.assertEqual(said, f'<@{STRANGER}> is not allowed anymore; it ran until <t:{until}:f> (<t:{until}:R>).')
+        text = (
+            f'The owner took back the allow of Stranger ({STRANGER}), which ran until 2027-01-22T08:00:00Z: their '
+            "messages are a stranger's again"
+        )
+        meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'until': 'denied'}
+        self.assertEqual(self.notices()[-1], (text, meta))
+        self.assertEqual(self.bot.allowed(), {})
+        self.assertEqual(self.use(OWNER, 'deny', user=STRANGER), f'<@{STRANGER}> has no allow to take back.')
+        self.assertEqual(
+            self.use(OWNER, 'deny', user=FRIEND),
+            f'<@{FRIEND}> is listed in AOGOWIMSY_USERS: their messages always reach the session, and the env file '
+            'takes them out.',
+        )
+        self.assertEqual(
+            self.use(OWNER, 'allow', user=OWNER), f'<@{OWNER}> is the owner: his messages always reach the session.'
+        )
+        self.assertEqual(self.use(OWNER, 'allow', user=BOT), f'<@{BOT}> is AogoWimsy itself.')
+        self.assertEqual(len(self.notices()), 2)
+
+    def test_allowed_and_discord_allowed_list_the_allows_in_force_the_soonest_end_first(self):
+        self.assertEqual(
+            self.use(OWNER, 'allowed'), f'No one is allowed now.\nListed in AOGOWIMSY_USERS, always: <@{FRIEND}>'
+        )
+        self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.use(OWNER, 'allow', user=OTHER_PERSON, time='7d')
+        self.use(OWNER, 'allow', user=CALLERS[0], time='2h')
+        self.now += 7200  # the 2 h one runs out
+        week = int(self.start + 604800)
+        self.assertEqual(
+            self.use(OWNER, 'allowed'),
+            f'Allowed:\n<@{OTHER_PERSON}> (Other): until <t:{week}:f> (<t:{week}:R>)\n<@{STRANGER}> (Stranger): for good\n'
+            f'Listed in AOGOWIMSY_USERS, always: <@{FRIEND}>',
+        )
+        got = self.tool('discord_allowed')
+        self.assertEqual(
+            got,
+            {
+                'allowed': [
+                    {'user_id': OTHER_PERSON, 'name': 'Other', 'since': aw.utc(self.start), 'until': aw.utc(week)},
+                    {'user_id': STRANGER, 'name': 'Stranger', 'since': aw.utc(self.start), 'until': None},
+                ],
+                'listed': [FRIEND],
+                'now': aw.utc(self.now),
+            },
+        )
+        self.assertIn('discord_allowed has no argument "x"', self.error('discord_allowed', x=1))
+
+    def test_allowed_past_a_messages_letters_says_how_many_more_discord_allowed_lists(self):
+        many = [f'10000000000000002{n:02d}' for n in range(60)]  # 60 lines of 43 letters
+        for user in many:
+            self.use(OWNER, 'allow', user=user, time='perm')
+        said = self.use(OWNER, 'allowed')
+        lines = said.split('\n')
+        self.assertLessEqual(len(said), 2000)
+        shown = len(lines) - 3  # Allowed:, the count of the rest, the listed users
+        self.assertEqual(lines[-2], f'{60 - shown} more: discord_allowed lists them all.')
+        self.assertEqual(lines[1:3], [f'<@{many[0]}> (webhook): for good', f'<@{many[1]}> (webhook): for good'])
+        self.assertEqual(len(self.tool('discord_allowed')['allowed']), 60)
+
+    def test_a_restart_keeps_the_allows_and_their_ends_in_a_private_file(self):
+        self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        self.use(OWNER, 'allow', user=OTHER_PERSON, time='perm')
+        path = self.state / 'allowed.json'
+        modes = stat.S_IMODE(path.stat().st_mode), stat.S_IMODE(self.state.stat().st_mode)
+        self.assertEqual(modes, (0o600, 0o700))
+        fresh, ear = self.restarted(self.now + 3600)
+        self.assertEqual(set(fresh.allowed()), {STRANGER, OTHER_PERSON})
+        self.pushes.clear()
+        number = self.fake.say(GENERAL, STRANGER, 'after a restart <@1000000000000000001>', mentions=[BOT])
+        ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        self.assertEqual([meta['kind'] for _, meta in self.pushes], ['message'])
+        fresh.store.now = lambda: self.now + 7201
+        self.assertEqual(set(fresh.allowed()), {OTHER_PERSON})
+
+    def test_two_servers_hearing_one_use_answer_it_once_and_each_tells_its_session(self):
+        _, other = self.restarted(self.now)
+        event = self.used(OWNER, 'allow', user=STRANGER)
+        for ear in (self.ear, other, other, self.ear):  # and the gateway's replay of it
+            ear.hear('INTERACTION_CREATE', event)
+        self.assertEqual(len(self.fake.posts('POST', f'/interactions/{event["id"]}/token-{event["id"]}/callback')), 1)
+        self.assertEqual(len(self.notices()), 2)  # once from each server
+        self.assertEqual(self.notices()[0], self.notices()[1])
+        later = f'commands: /aogo allow in channel {GENERAL} was answered by another server of AogoWimsy'
+        self.assertEqual(self.logs.count(later), 3)
+
+    def test_a_use_waits_while_another_server_holds_the_lock(self):
+        aw.private_folder(self.state)
+        held = os.open(self.state / aw.STATE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        event = self.used(OWNER, 'allow', user=STRANGER)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            looking = aw.started(lambda: self.ear.hear('INTERACTION_CREATE', event))
+            looking.join(0.3)
+            self.assertTrue(looking.is_alive())  # waiting for the other server's look and change to end
+            self.assertNotIn(event['id'], self.fake.answers)
+            self.assertFalse((self.state / 'interactions.json').exists())
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+        looking.join(5)
+        self.assertIn(event['id'], self.fake.answers)
+        self.assertIn(STRANGER, self.bot.allowed())
+
+    def test_a_use_is_answered_in_a_thread_of_its_own_ahead_of_the_queue(self):
+        event = self.used(STRANGER, 'help')
+        self.ear.feed('INTERACTION_CREATE', event)  # no ear.run: the queue is never read
+        for _ in range(500):
+            if event['id'] in self.fake.answers:
+                break
+            time.sleep(0.01)
+        self.assertEqual(self.fake.answers[event['id']]['data']['content'], f'{LINE}\n{HELP_TEXT}')
+        self.assertTrue(self.ear.queue.empty())
+
+    def test_an_answer_discord_refuses_is_an_error_without_its_token_and_the_allow_holds(self):
+        event = self.used(OWNER, 'allow', user=STRANGER)
+        self.fake.answers[event['id']] = 'answered already'
+        self.ear.hear('INTERACTION_CREATE', event)
+        said = (
+            f'AogoWimsy could not answer /aogo allow in channel {GENERAL}: Discord answered 400 to POST /interactions/'
+            f'{event["id"]}/<token>/callback: Interaction has already been acknowledged. (code 40060)'
+        )
+        self.assertEqual([text for text, meta in self.pushes if meta['kind'] == 'error'], [said])
+        self.assertEqual(len(self.notices()), 1)
+        self.assertIn(STRANGER, self.bot.allowed())
+        self.assertNotIn('token-', json.dumps([self.pushes, self.logs]))
+
+    def test_a_state_file_it_cannot_read_is_said_to_the_session_and_answered_to_the_asker(self):
+        aw.private_folder(self.state)
+        path = self.state / 'allowed.json'
+        path.write_text('{"allowed": [{"id": 5}]}')
+        said = self.use(OWNER, 'allow', user=STRANGER)
+        self.assertTrue(said.startswith(f'AogoWimsy could not answer this: {path}: item 1 is {{"id": 5}}, not '), said)
+        self.assertTrue(said.endswith('no allow is read until it is mended or removed.'), said)
+        self.assertEqual(self.use(STRANGER, 'allowed'), f'Only <@{OWNER}> can use /aogo allowed.')
+        told = "AogoWimsy could not answer this: its owner's session was told why."
+        self.assertEqual(self.use(STRANGER, 'help'), told)  # whether they are allowed is read for help too
+        errors = [text for text, meta in self.pushes if meta['kind'] == 'error']
+        self.assertEqual(
+            [text.split(': ')[0] for text in errors],
+            [f'AogoWimsy could not answer /aogo {sub} in channel {GENERAL}' for sub in ('allow', 'help')],
+        )
+        self.assertTrue(all(f': {path}: item 1 is ' in text for text in errors), errors)
+        self.assertEqual(path.read_text(), '{"allowed": [{"id": 5}]}')
+
+    def test_another_subcommand_or_command_is_answered_naming_what_it_has(self):
+        self.assertEqual(
+            self.use(OWNER, 'forget'), '/aogo forget is not a command of AogoWimsy: it has help, allow, deny, allowed.'
+        )
+        event = self.used(OWNER, 'help', name='other')
+        self.ear.hear('INTERACTION_CREATE', event)
+        self.assertEqual(
+            self.fake.answers[event['id']]['data']['content'], '/other is not a command of AogoWimsy: it has /aogo.'
+        )
+        self.ear.hear('INTERACTION_CREATE', dict(event, id='1600000000000000001', type=3))  # a button: none here
+        self.assertNotIn('1600000000000000001', self.fake.answers)
+
+    def test_the_instructions_and_tools_tell_the_session_of_the_allows(self):
+        said = aw.instructions(self.settings)
+        self.assertIn('/aogo allow', said)
+        self.assertIn('discord_allowed', said)
+        self.assertIn('kind="notice"', said)
+        self.assertIn('discord_allowed', [tool['name'] for tool in aw.tool_list(aw.AOGO)])
 
 
 def ws_frame(opcode, payload, fin=True):
@@ -1778,13 +3049,26 @@ class Stdio(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.env = write_env(self.folder.name, GOOD_ENV)
 
-    def start(self, *args):
-        command = [sys.executable, str(HERE / 'aogowimsy.py'), *args]
-        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    program = HERE / 'aogowimsy.py'  # xuji/test_xujiwimsy.py's Stdio runs its own with these helpers
+
+    def start(self, *args, environ=None, program=None):
+        command = [sys.executable, str(program or self.program), *args]
+        proc = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environ
+        )
         watchdog = threading.Timer(20, proc.kill)
         watchdog.start()
-        self.addCleanup(watchdog.cancel)
+        self.addCleanup(self.ended, proc, watchdog)
         return proc
+
+    def ended(self, proc, watchdog):
+        """a program a test left running or open, when it failed halfway: killed and closed"""
+        watchdog.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            stream.close()
 
     def exchange(self, proc, message):
         line = message if isinstance(message, bytes) else json.dumps(message).encode()
@@ -1824,7 +3108,10 @@ class Stdio(unittest.TestCase):
             answer['result']['content'][0]['text'], 'channel is "general", not a Discord id (17 to 20 digits)'
         )
         errors = self.finish(proc)
-        self.assertIn(f'aogowimsy: up: owner {OWNER}, 1 users, 2 channels', errors)
+        up = (
+            f'aogowimsy: up: owner {OWNER}, 1 users, 2 channels, greeting a stranger once each 24 h, 10 an hour at most'
+        )
+        self.assertIn(up + '\n', errors)
         self.assertIn('aogowimsy: discord_read failed: channel is "general"', errors)
 
     def test_a_2026_07_28_client_gets_method_not_found_for_discovery(self):

@@ -3,8 +3,9 @@
 
     xujiwimsy.py [--env FILE]       FILE: ~/.config/xujiwimsy/xujiwimsy.env when not given; mode 600 or stricter
 
-aogo/aogowimsy.py with Xuji's identity: its bot, its env file and XUJIWIMSY_ keys, the same five tools, no
-claude/channel (the session hears through discord_wait), and any client but Claude Code. A fix there is a fix here.
+aogo/aogowimsy.py with Xuji's identity: its bot, its env file and XUJIWIMSY_ keys, eight of its tools (the unicode
+emojis alone), no claude/channel (the session hears through discord_wait), and any client but Claude Code. A fix there
+is a fix here.
 """
 
 import sys
