@@ -175,12 +175,20 @@ class Handshake(WithXuji):
         self.assertNotIn('aogo', text.lower().replace(f':{aw.WIMSY}:', ''))  # the owner's emoji alone is named for Aogo
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
-        aogos = ('discord_emoji_upload', 'discord_allowed')  # Aogo's drawings' and its command's, which Xuji has not
+        # Aogo's drawings' and its command's (the allows, the ice, which its state holds), which Xuji has not
+        aogos = ('discord_emoji_upload', 'discord_allowed', 'discord_freeze')
         as_aogo = json.loads(text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY'))
+        drafts = json.loads(
+            json.dumps(aogo[0])
+        )  # AogoWimsy's discord_post less its direct posts, which Xuji makes none of
+        self.assertEqual(drafts['name'], 'discord_post')
+        drafts['description'] = drafts['description'].removesuffix(aw.direct_text(aw.AOGO))
+        del drafts['inputSchema']['properties']['direct']
         self.assertEqual(
             [tool for tool in as_aogo if tool['name'] not in reacting],
-            [tool for tool in aogo if tool['name'] not in (*reacting, *aogos)],
+            [drafts] + [tool for tool in aogo[1:] if tool['name'] not in (*reacting, *aogos)],
         )
+        self.assertNotIn('direct', text)
         self.assertEqual([tool['name'] for tool in xuji], [name for name in aw.TOOL_NAMES if name not in aogos])
         for name in aogos:
             call = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': name}}
@@ -207,6 +215,21 @@ class Handshake(WithXuji):
             'Method not found: server/discover; XujiWimsy speaks the initialize handshake '
             '(2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05)',
         )
+
+
+class Drafts(WithXuji):
+    def test_a_direct_post_is_refused_naming_why_and_no_direct_key_is_taken(self):
+        said = self.error('discord_post', channel=GENERAL, text='hello', direct=True)
+        self.assertEqual(
+            said,
+            'direct is true, and XujiWimsy posts drafts only: the quota and context its direct posts would follow are '
+            "Claude Code's: post it without direct, as a draft the owner sees",
+        )
+        self.assertEqual(self.fake.requests, [])
+        self.assertEqual(
+            self.tool('discord_post', channel=GENERAL, text='hello', direct=False, wait=0)['status'], 'waiting'
+        )
+        self.assertEqual(aw.XUJI.direct_keys, ())
 
 
 class Clients(WithXuji):
