@@ -514,7 +514,9 @@ class EnvFile(unittest.TestCase):
 
     def test_an_empty_or_missing_needed_value_is_named(self):
         self.assertIn('AOGOWIMSY_TOKEN is empty', self.refused(GOOD_ENV.replace(TOKEN, '')))
-        self.assertIn('AOGOWIMSY_USERS is missing', self.refused(GOOD_ENV.replace(f'AOGOWIMSY_USERS = {FRIEND}', '')))
+        # AOGOWIMSY_USERS is deprecated: missing or empty, no one is listed (XujiWimsy's suite: its own is needed)
+        for text in (GOOD_ENV.replace(f'AOGOWIMSY_USERS = {FRIEND}', ''), GOOD_ENV.replace(f' = {FRIEND}', '=')):
+            self.assertEqual(aw.read_settings(self.env(text)).users, frozenset())
 
     def test_a_key_twice_a_line_with_no_equals_and_a_bad_token_letter_never_show_the_token(self):
         said = self.refused(GOOD_ENV + f'AOGOWIMSY_OWNER={OWNER}\n')
@@ -1090,7 +1092,7 @@ class Read(WithDiscord):
         said = self.error('discord_read', channel=GENERAL, **{'from': [FRIEND, STRANGER]})
         self.assertEqual(
             said,
-            f'from item 2 is {STRANGER}, neither the owner ({OWNER}), a listed user ({FRIEND}) nor one he allowed',
+            f'from item 2 is {STRANGER}, neither the owner ({OWNER}), a trusted user ({FRIEND}) nor one he allowed',
         )
         self.assertIn(
             'from is []: a list of 1 or more ids', self.error('discord_read', channel=GENERAL, **{'from': []})
@@ -1224,7 +1226,7 @@ class Attachments(WithDiscord):
         said = self.error('discord_attachments', channel=GENERAL, message=number)
         self.assertEqual(
             said,
-            f"message {number} is not one AogoWimsy gives: neither the owner's ({OWNER}), a listed user's ({FRIEND}) "
+            f"message {number} is not one AogoWimsy gives: neither the owner's ({OWNER}), a trusted user's ({FRIEND}) "
             f'nor its own, and the owner has not let it through (his :{aw.WIMSY}: reaction, or his reply to it '
             'mentioning AogoWimsy)',
         )
@@ -2498,8 +2500,19 @@ OWNERS_HELP = (
     'Yours alone:\n'
     '/aogo allow user [time]: their messages to me reach the session; time 2h, 1d, 7d or perm, 1d without one\n'
     '/aogo deny user: takes their allow back\n'
-    '/aogo allowed: who is allowed, and until when'
+    '/aogo allowed: who is allowed, and until when\n'
+    '/aogo trust user: they reach the session as one you trust, 30 messages an hour\n'
+    '/aogo untrust user: takes their trust back\n'
+    '/aogo weight user level [time]: mute 0, low 3, normal 10 or high 30 of their messages an hour reach the session, '
+    "1d without a time; then their level's again"
 )
+SUBS = 'help, allow, deny, allowed, trust, untrust, weight'  # /aogo's subcommands, as a log and an answer name them
+TIME_CHOICES = [
+    {'name': '2 hours', 'value': '2h'},
+    {'name': '1 day', 'value': '1d'},
+    {'name': '7 days', 'value': '7d'},
+    {'name': 'permanent', 'value': 'perm'},
+]
 # /aogo as AogoWimsy registers it, word for word
 AOGO_COMMAND = {
     'type': 1,
@@ -2534,12 +2547,45 @@ AOGO_COMMAND = {
             'options': [{'type': 6, 'name': 'user', 'description': 'Whose allow to take back', 'required': True}],
         },
         {'type': 1, 'name': 'allowed', 'description': 'DraVee only: who is allowed, and until when'},
+        {
+            'type': 1,
+            'name': 'trust',
+            'description': 'DraVee only: Aogo hears someone as trusted, 30 messages an hour',
+            'options': [{'type': 6, 'name': 'user', 'description': 'Who to trust', 'required': True}],
+        },
+        {
+            'type': 1,
+            'name': 'untrust',
+            'description': "DraVee only: take someone's trust back",
+            'options': [{'type': 6, 'name': 'user', 'description': 'Whose trust to take back', 'required': True}],
+        },
+        {
+            'type': 1,
+            'name': 'weight',
+            'description': "DraVee only: how many of someone's messages an hour reach Aogo, for a time",
+            'options': [
+                {'type': 6, 'name': 'user', 'description': 'Whose weight to set', 'required': True},
+                {
+                    'type': 3,
+                    'name': 'level',
+                    'description': 'How many of their messages an hour reach the session',
+                    'required': True,
+                    'choices': [
+                        {'name': 'mute (0 an hour)', 'value': 'mute'},
+                        {'name': 'low (3 an hour)', 'value': 'low'},
+                        {'name': 'normal (10 an hour)', 'value': 'normal'},
+                        {'name': 'high (30 an hour)', 'value': 'high'},
+                    ],
+                },
+                {'type': 3, 'name': 'time', 'description': 'For how long: 1 day without one', 'choices': TIME_CHOICES},
+            ],
+        },
     ],
 }
 
 
-class Commands(Hearing):
-    """/aogo: registered in each server, help for anyone, allow, deny and allowed for the owner alone"""
+class Owned(Hearing):
+    """the owner's commands as the gateway brings their uses, at a time the test moves"""
 
     def setUp(self):
         super().setUp()
@@ -2591,6 +2637,10 @@ class Commands(Hearing):
     def notices(self):
         return [(text, meta) for text, meta in self.pushes if meta['kind'] == 'notice']
 
+
+class Commands(Owned):
+    """/aogo: registered in each server, help for anyone, allow, deny and allowed for the owner alone"""
+
     def test_the_command_is_registered_in_each_server_as_it_is_and_again_only_when_it_differs(self):
         path = f'/applications/{APP}/guilds/{GUILD}/commands'
         self.assertEqual([body for _, _, _, body in self.fake.posts('PUT', path)], [[AOGO_COMMAND]])
@@ -2598,14 +2648,14 @@ class Commands(Hearing):
         self.assertFalse(self.fake.posts('GET', '/applications/@me'))  # READY's application id
         self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})  # seen again, or another server
         self.assertEqual((len(self.fake.posts('GET', path)), len(self.fake.posts('PUT', path))), (2, 1))
-        self.assertEqual(self.logs, [f'commands: /aogo (help, allow, deny, allowed) already there in server {GUILD}'])
+        self.assertEqual(self.logs, [f'commands: /aogo ({SUBS}) already there in server {GUILD}'])
         self.fake.commands[GUILD][0]['description'] = 'an older text'
         self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
         self.assertEqual(len(self.fake.posts('PUT', path)), 2)
         self.fake.commands[GUILD].append(dict(self.fake.commands[GUILD][0], name='old', id='800000000000000999'))
         self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
         self.assertEqual([command['name'] for command in self.fake.commands[GUILD]], ['aogo'])
-        self.assertEqual(self.logs[-1], f'commands: /aogo (help, allow, deny, allowed) registered in server {GUILD}')
+        self.assertEqual(self.logs[-1], f'commands: /aogo ({SUBS}) registered in server {GUILD}')
         self.assertEqual(self.pushes, [])
 
     def test_a_server_without_the_commands_scope_says_so_with_the_invite_that_gives_it(self):
@@ -2691,11 +2741,12 @@ class Commands(Hearing):
         until = int(self.now + 7200)
         self.assertEqual(
             said,
-            f'<@{STRANGER}> is allowed until <t:{until}:f> (<t:{until}:R>): their messages to me reach the session.',
+            f'<@{STRANGER}> is allowed until <t:{until}:f> (<t:{until}:R>): their messages to me reach the session, '
+            '10 an hour (weight normal).',
         )
         text = (
             f'The owner allowed Stranger ({STRANGER}) until 2027-01-15T10:00:00Z (2 hours): their messages addressed to '
-            "AogoWimsy reach you as a listed user's do, and discord_allowed lists them."
+            'AogoWimsy reach you, 10 an hour (weight normal), and discord_allowed lists them.'
         )
         meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'until': '2027-01-15T10:00:00Z'}
         self.assertEqual(self.notices(), [(text, meta)])
@@ -2761,8 +2812,7 @@ class Commands(Hearing):
         self.assertEqual(self.use(OWNER, 'deny', user=STRANGER), f'<@{STRANGER}> has no allow to take back.')
         self.assertEqual(
             self.use(OWNER, 'deny', user=FRIEND),
-            f'<@{FRIEND}> is listed in AOGOWIMSY_USERS: their messages always reach the session, and the env file '
-            'takes them out.',
+            f'<@{FRIEND}> has no allow to take back; they are trusted, which /aogo untrust takes.',
         )
         self.assertEqual(
             self.use(OWNER, 'allow', user=OWNER), f'<@{OWNER}> is the owner: his messages always reach the session.'
@@ -2771,9 +2821,7 @@ class Commands(Hearing):
         self.assertEqual(len(self.notices()), 2)
 
     def test_allowed_and_discord_allowed_list_the_allows_in_force_the_soonest_end_first(self):
-        self.assertEqual(
-            self.use(OWNER, 'allowed'), f'No one is allowed now.\nListed in AOGOWIMSY_USERS, always: <@{FRIEND}>'
-        )
+        self.assertEqual(self.use(OWNER, 'allowed'), f'No one is allowed now.\nTrusted: <@{FRIEND}>')
         self.use(OWNER, 'allow', user=STRANGER, time='perm')
         self.use(OWNER, 'allow', user=OTHER_PERSON, time='7d')
         self.use(OWNER, 'allow', user=CALLERS[0], time='2h')
@@ -2782,7 +2830,7 @@ class Commands(Hearing):
         self.assertEqual(
             self.use(OWNER, 'allowed'),
             f'Allowed:\n<@{OTHER_PERSON}> (Other): until <t:{week}:f> (<t:{week}:R>)\n<@{STRANGER}> (Stranger): for good\n'
-            f'Listed in AOGOWIMSY_USERS, always: <@{FRIEND}>',
+            f'Trusted: <@{FRIEND}>',
         )
         got = self.tool('discord_allowed')
         self.assertEqual(
@@ -2792,6 +2840,7 @@ class Commands(Hearing):
                     {'user_id': OTHER_PERSON, 'name': 'Other', 'since': aw.utc(self.start), 'until': aw.utc(week)},
                     {'user_id': STRANGER, 'name': 'Stranger', 'since': aw.utc(self.start), 'until': None},
                 ],
+                'trusted': [FRIEND],
                 'listed': [FRIEND],
                 'now': aw.utc(self.now),
             },
@@ -2896,9 +2945,7 @@ class Commands(Hearing):
         self.assertEqual(path.read_text(), '{"allowed": [{"id": 5}]}')
 
     def test_another_subcommand_or_command_is_answered_naming_what_it_has(self):
-        self.assertEqual(
-            self.use(OWNER, 'forget'), '/aogo forget is not a command of AogoWimsy: it has help, allow, deny, allowed.'
-        )
+        self.assertEqual(self.use(OWNER, 'forget'), f'/aogo forget is not a command of AogoWimsy: it has {SUBS}.')
         event = self.used(OWNER, 'help', name='other')
         self.ear.hear('INTERACTION_CREATE', event)
         self.assertEqual(
@@ -2913,6 +2960,257 @@ class Commands(Hearing):
         self.assertIn('discord_allowed', said)
         self.assertIn('kind="notice"', said)
         self.assertIn('discord_allowed', [tool['name'] for tool in aw.tool_list(aw.AOGO)])
+
+
+class Trust(Owned):
+    """who reaches the session and how much: the owner's trust and weights, the env file's list as where trust starts"""
+
+    def call(self, who, text, channel=GENERAL):
+        return self.heard(channel, who, f'<@{BOT}> {text}', mentions=[BOT])
+
+    def told(self):
+        return [text for text, meta in self.pushes if meta['kind'] == 'message']
+
+    def test_a_listed_user_starts_trusted_until_a_command_changes_it_and_anyone_may_be_trusted(self):
+        self.assertEqual(self.bot.standing(FRIEND)[:3], ('trusted', None, 'high'))
+        said = self.use(OWNER, 'untrust', user=FRIEND)
+        self.assertEqual(
+            said, f"<@{FRIEND}> is not trusted anymore: their messages are a stranger's: none reaches the session."
+        )
+        text = f"The owner took back the trust of friend ({FRIEND}): their messages are a stranger's: none reaches you."
+        meta = {'kind': 'notice', 'user': 'friend', 'user_id': FRIEND, 'trust': 'stranger'}
+        self.assertEqual(self.notices(), [(text, meta)])
+        self.pushes.clear()
+        self.call(FRIEND, 'still there?')
+        self.assertEqual(self.pushes, [])
+        bodies = [body['content'] for _, _, _, body in self.fake.posts('POST', f'/channels/{GENERAL}/messages')]
+        self.assertEqual(bodies, [LINE])  # a stranger now, greeted
+        self.assertEqual(self.use(OWNER, 'untrust', user=FRIEND), f'<@{FRIEND}> is not trusted.')
+        self.assertEqual(len(self.notices()), 0)  # cleared above: an answer that changed nothing tells nothing
+        said = self.use(OWNER, 'trust', user=FRIEND)
+        self.assertEqual(said, f'<@{FRIEND}> is trusted: 30 of their messages an hour reach the session (weight high).')
+        self.assertEqual(self.notices()[-1][1]['trust'], 'trusted')
+        self.assertEqual(self.use(OWNER, 'trust', user=FRIEND), f'<@{FRIEND}> is trusted already.')
+        self.assertEqual(len(self.notices()), 1)
+        self.use(OWNER, 'trust', user=OTHER_PERSON)  # someone the env file does not list
+        self.pushes.clear()
+        self.call(FRIEND, 'back')
+        self.call(OTHER_PERSON, 'me too')
+        self.assertEqual(self.told(), [f'<@{BOT}> back', f'<@{BOT}> me too'])
+        self.assertEqual(self.tool('discord_allowed')['trusted'], [FRIEND, OTHER_PERSON])
+        path = self.state / 'people.json'
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(
+            [(item['id'], item['trusted']) for item in json.loads(path.read_text())['people']],
+            [(FRIEND, True), (OTHER_PERSON, True)],
+        )
+
+    def test_trust_untrust_and_weight_are_the_owners_and_never_on_himself_or_the_bot(self):
+        for sub, extra in (('trust', {}), ('untrust', {}), ('weight', {'level': 'low'})):
+            with self.subTest(sub=sub):
+                self.assertEqual(self.use(FRIEND, sub, user=STRANGER, **extra), f'Only <@{OWNER}> can use /aogo {sub}.')
+                said = self.use(OWNER, sub, user=OWNER, **extra)
+                self.assertEqual(said, f'<@{OWNER}> is the owner: never limited, trusted or iced.')
+                self.assertEqual(self.use(OWNER, sub, user=BOT, **extra), f'<@{BOT}> is AogoWimsy itself.')
+        self.assertFalse((self.state / 'people.json').exists())
+        self.assertEqual(self.notices(), [])
+
+    def test_a_weight_caps_the_messages_an_hour_that_reach_the_session_and_counts_the_rest(self):
+        self.use(OWNER, 'allow', user=STRANGER, time='7d')
+        self.pushes.clear()
+        for n in range(11):  # allowed: normal, 10 an hour
+            self.call(STRANGER, f'question {n}')
+            self.now += 60
+        self.assertEqual(self.told(), [f'<@{BOT}> question {n}' for n in range(10)])
+        said = f'channel: a message event in channel {GENERAL} is not told: counted: weight normal'
+        self.assertEqual(self.logs[-1], said)
+        self.now = self.start + 3601  # the first one is over an hour old
+        self.call(STRANGER, 'question 11')
+        self.assertEqual(self.told()[-1], f'<@{BOT}> question 11')
+        self.pushes.clear()
+        self.use(OWNER, 'weight', user=FRIEND, level='low', time='2h')
+        for n in range(4):
+            self.call(FRIEND, f'low {n}')
+        self.assertEqual(self.told(), [f'<@{BOT}> low {n}' for n in range(3)])
+        self.pushes.clear()
+        for n in range(35):  # the owner is never weighed
+            self.call(OWNER, f'owner {n}')
+        self.assertEqual(len(self.told()), 35)
+        heard = json.loads((self.state / 'heard.json').read_text())['heard']
+        self.assertEqual([(who, said) for _, who, _, said in heard].count((FRIEND, 'counted: weight low')), 1)
+        self.assertNotIn(OWNER, [who for _, who, _, _ in heard])
+
+    def test_mute_lets_none_reach_the_session_nor_discord_read_and_from_names_why(self):
+        before = self.fake.say(GENERAL, OWNER, 'before')
+        said = self.use(OWNER, 'weight', user=FRIEND, level='mute')
+        until = int(self.now + 86400)
+        self.assertEqual(
+            said,
+            f'<@{FRIEND}> weighs mute: 0 of their messages an hour reach the session, until <t:{until}:f> '
+            f'(<t:{until}:R>); then high again, 30 an hour, as trusted people have.',
+        )
+        self.pushes.clear()
+        number = self.call(FRIEND, 'hello?')
+        self.assertEqual(self.told(), [])
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        self.assertEqual((got['messages'], got['left_out']), ([], 1))
+        why = f'weighs mute until {aw.utc(until)}: none of their messages reach the session'
+        self.assertEqual(
+            self.error('discord_read', channel=GENERAL, **{'from': [FRIEND]}), f'from item 1 is {FRIEND}, who {why}'
+        )
+        said = self.error('discord_react', channel=GENERAL, message=number, emoji=EYES)
+        self.assertEqual(said, f'message {number} is not one AogoWimsy gives: its author {why}')
+
+    def test_weight_takes_each_level_and_time_and_refuses_a_stranger_or_a_wrong_value_naming_the_one_in_force(self):
+        said = self.use(OWNER, 'weight', user=STRANGER, level='low')
+        self.assertEqual(
+            said,
+            f'<@{STRANGER}> is a stranger: none of their messages reach the session to weigh; /aogo trust or allow '
+            'them first.',
+        )
+        was = f'<@{FRIEND}> weighs high, 30 of their messages an hour, as before.'
+        said = self.use(OWNER, 'weight', user=FRIEND, level='loud')
+        self.assertEqual(said, f'level is "loud", not one of mute, low, normal, high: {was}')
+        said = self.use(OWNER, 'weight', user=FRIEND, level='low', time='3h')
+        self.assertEqual(said, f'time is "3h", not one of 2h, 1d, 7d, perm: {was}')
+        self.assertEqual(self.notices(), [])
+        for time_value, seconds in (('2h', 7200), ('7d', 604800), (None, 86400)):
+            options = {'level': 'low'} | ({} if time_value is None else {'time': time_value})
+            self.use(OWNER, 'weight', user=FRIEND, **options)
+            self.assertEqual(self.bot.standing(FRIEND)[2:5], ('low', self.now + seconds, True))
+        text, meta = self.notices()[-1]
+        until = self.now + 86400
+        self.assertEqual(
+            text,
+            f'The owner set friend ({FRIEND}) to weight low: 3 of their messages an hour reach you, until '
+            f'{aw.utc(until)}; then high again, 30 an hour, as trusted people have. It was low until '
+            f'{aw.utc(self.now + 604800)} before.',
+        )
+        weighed = {'kind': 'notice', 'user': 'friend', 'user_id': FRIEND, 'weight': 'low', 'until': aw.utc(until)}
+        self.assertEqual(meta, weighed)
+        said = self.use(OWNER, 'weight', user=FRIEND, level='normal', time='perm')
+        self.assertTrue(
+            said.startswith(
+                f'<@{FRIEND}> weighs normal: 10 of their messages an hour reach the session, for good, until a new '
+                'weight.'
+            ),
+            said,
+        )
+        self.assertEqual(self.notices()[-1][1]['until'], 'permanent')
+        self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        self.use(OWNER, 'weight', user=STRANGER, level='high', time='7d')
+        self.now += 7200  # the allow runs out: a stranger again, whatever their weight
+        self.assertEqual(self.bot.standing(STRANGER)[:3], ('stranger', None, None))
+
+    def test_a_weight_that_runs_out_brings_the_levels_back_and_the_session_is_told_once(self):
+        self.ear.started = self.now
+        self.use(OWNER, 'weight', user=FRIEND, level='low', time='2h')
+        self.use(OWNER, 'allow', user=STRANGER, time='2h')
+        self.use(OWNER, 'weight', user=STRANGER, level='high', time='2h')
+        self.pushes.clear()
+        self.ear.tick()
+        self.assertEqual(self.pushes, [])
+        self.now += 7200
+        self.ear.tick()
+        ran_out = aw.utc(self.start + 7200)
+        self.assertEqual(
+            self.pushes,
+            [
+                (
+                    (
+                        f'The weight low the owner set for friend ({FRIEND}) ran out at {ran_out}: back to high, 30 of '
+                        'their messages an hour, as trusted people have'
+                    ),
+                    {'kind': 'notice', 'user': 'friend', 'user_id': FRIEND, 'weight': 'high', 'until': 'ran out'},
+                ),
+                (
+                    (
+                        f'The weight high the owner set for Stranger ({STRANGER}) ran out at {ran_out}: their messages are '
+                        "a stranger's, and none reaches you"
+                    ),
+                    {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'weight': 'none', 'until': 'ran out'},
+                ),
+            ],
+        )
+        self.ear.tick()
+        self.assertEqual(len(self.pushes), 2)
+        _, late = self.restarted(self.now)  # a server started after they ran out tells nothing of them
+        late.started = self.now + 1
+        late.tick()
+        self.assertEqual(len(self.pushes), 2)
+
+    def test_two_servers_hearing_one_message_weigh_it_once_and_each_tells_its_session(self):
+        _, other = self.restarted(self.now)
+        self.use(OWNER, 'weight', user=FRIEND, level='low', time='2h')
+        self.pushes.clear()
+        for n in range(4):
+            number = self.fake.say(GENERAL, FRIEND, f'<@{BOT}> {n}', mentions=[BOT])
+            for ear in (self.ear, other):
+                ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        self.assertEqual(self.told(), [f'<@{BOT}> {n}' for n in range(3) for _ in (self.ear, other)])
+        heard = json.loads((self.state / 'heard.json').read_text())['heard']
+        self.assertEqual([said for _, _, _, said in heard], ['reached'] * 3 + ['counted: weight low'])
+
+    def test_a_heard_file_it_cannot_read_lets_nothing_through_and_says_so(self):
+        aw.private_folder(self.state)
+        path = self.state / 'heard.json'
+        path.write_text('{"heard": [[1, "x", "y", 2]]}')
+        number = self.call(FRIEND, 'hello')
+        [(said, meta)] = self.pushes
+        self.assertEqual(meta, {'kind': 'error'})
+        self.assertTrue(
+            said.startswith(
+                f'AogoWimsy could not weigh message {number} in channel {GENERAL}, so it did not reach you: {path}: '
+                'item 1 is '
+            ),
+            said,
+        )
+        stops = 'no message of a trusted or allowed person reaches the session until it is mended or removed'
+        self.assertTrue(said.endswith(stops), said)
+
+    def test_the_owner_is_told_once_ever_that_the_env_files_list_is_deprecated(self):
+        self.ear.once()
+        [told] = self.fake.messages[DM]
+        self.assertEqual(
+            told['content'],
+            f'AOGOWIMSY_USERS is deprecated: the people it lists (<@{FRIEND}>) start trusted, and /aogo trust, untrust, '
+            'allow, deny and weight say who reaches me now. It is still read; take its line out of the env file when '
+            'you like.',
+        )
+        self.assertEqual(self.fake.posts('POST', f'/channels/{DM}/messages')[0][3]['allowed_mentions'], {'parse': []})
+        _, other = self.restarted(self.now)  # a restart, or another session's server
+        other.once()
+        self.ear.once()
+        self.assertEqual(len(self.fake.messages[DM]), 1)
+        flags = json.loads((self.state / 'flags.json').read_text())
+        self.assertEqual(flags, {'flags': [['users-deprecated', self.now]]})
+        self.assertEqual(self.logs.count('deprecated: the owner was told AOGOWIMSY_USERS is deprecated'), 1)
+
+    def test_a_deprecation_dm_discord_refuses_is_said_and_sent_at_the_next_start(self):
+        route = ('POST', f'/channels/{DM}/messages')
+        self.fake.fail[route] = (403, {'message': 'Cannot send messages to this user', 'code': 50007})
+        self.ear.once()
+        said = (
+            f'AogoWimsy could not tell the owner that AOGOWIMSY_USERS is deprecated: Discord answered 403 to POST '
+            f'/channels/{DM}/messages: Cannot send messages to this user (code 50007); it tries again at its next start'
+        )
+        self.assertEqual(self.pushes, [(said, {'kind': 'error'})])
+        self.assertEqual(json.loads((self.state / 'flags.json').read_text()), {'flags': []})
+        del self.fake.fail[route]
+        self.ear.once()
+        self.assertEqual(len(self.fake.messages[DM]), 1)
+        self.bot.settings = self.settings._replace(users=frozenset())  # none listed: nothing to say
+        (self.state / 'flags.json').write_text('{"flags": []}')
+        self.ear.once()
+        self.assertEqual(len(self.fake.messages[DM]), 1)
+
+    def test_no_text_of_the_server_leaves_a_placeholder_unfilled(self):
+        for identity in aw.IDENTITIES:
+            settings = self.settings._replace(identity=identity)
+            texts = [aw.instructions(settings), json.dumps(aw.tool_list(identity))]
+            texts += [json.dumps(aw.command_list(identity)), aw.HELP_OWNER.format(command='aogo')]
+            for text in texts:
+                self.assertEqual(re.findall(r'\{[a-z_]+\}', text), [], identity.title)
 
 
 def ws_frame(opcode, payload, fin=True):

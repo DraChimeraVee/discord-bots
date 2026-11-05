@@ -124,7 +124,9 @@ class Identity(NamedTuple):
 
     @property
     def needed(self):
-        return tuple(self.key(name) for name in ('TOKEN', 'OWNER', 'USERS'))
+        """the keys it cannot run without: USERS too for a bot with no command, whose env file alone says who it
+        hears"""
+        return tuple(self.key(name) for name in ('TOKEN', 'OWNER', *(() if self.command else ('USERS',))))
 
     @property
     def greet_keys(self):
@@ -133,7 +135,7 @@ class Identity(NamedTuple):
 
     @property
     def keys(self):
-        return (*self.needed, self.key('CHANNELS'), *self.greet_keys)
+        return (*(self.key(name) for name in ('TOKEN', 'OWNER', 'USERS', 'CHANNELS')), *self.greet_keys)
 
     @property
     def says(self):
@@ -180,13 +182,24 @@ HELP_OWNER = (
     'Yours alone:\n'
     '/{command} allow user [time]: their messages to me reach the session; time 2h, 1d, 7d or perm, 1d without one\n'
     '/{command} deny user: takes their allow back\n'
-    '/{command} allowed: who is allowed, and until when'
+    '/{command} allowed: who is allowed, and until when\n'
+    '/{command} trust user: they reach the session as one you trust, 30 messages an hour\n'
+    '/{command} untrust user: takes their trust back\n'
+    '/{command} weight user level [time]: mute 0, low 3, normal 10 or high 30 of their messages an hour reach the '
+    "session, 1d without a time; then their level's again"
 )
 ALLOW_TIMES = {'2h': 2 * 3600, '1d': 24 * 3600, '7d': 7 * 24 * 3600, 'perm': None}  # seconds; None: until denied
 ALLOW_NAMES = {'2h': '2 hours', '1d': '1 day', '7d': '7 days', 'perm': 'permanent'}  # as Discord's picker shows them
 ALLOW_DEFAULT = '1d'  # an allow with no time
-SUBCOMMANDS = ('help', 'allow', 'deny', 'allowed')
-OWNERS_ALONE = ('allow', 'deny', 'allowed')
+SUBCOMMANDS = ('help', 'allow', 'deny', 'allowed', 'trust', 'untrust', 'weight')
+OWNERS_ALONE = SUBCOMMANDS[1:]
+# The weights (DraVee, 2026-11-05: "peso temporario: tipo eu poder num periodo de tempo permitir q a pessoa converse
+# mais com vc ou menos"): the messages of a person an hour that reach the session; past them the rest is only counted
+WEIGHTS = {'mute': 0, 'low': 3, 'normal': 10, 'high': 30}
+LEVEL_WEIGHTS = {'trusted': 'high', 'allowed': 'normal'}  # each level's weight when the owner set none
+OWNED = "'s"  # what heard_words adds for whose message
+HEARD_FOR = 24 * 3600  # seconds what became of a message is kept: the counts of the day
+TICK = 15.0  # seconds between two looks at the people's state for what ran out
 # Discord's numbers: a command of the chat input (CHAT_INPUT), its options' types, an interaction's type, the answer
 # that is a message (CHANNEL_MESSAGE_WITH_SOURCE) and the flag that shows it to its asker alone
 CHAT_INPUT, SUB_COMMAND, STRING_OPTION, USER_OPTION = 1, 1, 3, 6
@@ -200,6 +213,9 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
     'helps': 'no stranger gets help',
     'allowed': 'no allow is read',
     'interactions': 'no command is answered',
+    'people': "no one's trust or weight is read",
+    'heard': 'no message of a trusted or allowed person reaches the session',
+    'flags': 'the one-time notes to the owner wait',
 }
 YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
 # The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
@@ -352,6 +368,17 @@ class Settings(NamedTuple):
     greet_per_hour: int = GREET_PER_HOUR
 
 
+class Standing(NamedTuple):
+    """what a person is to the bot now"""
+
+    level: str  # owner, trusted, allowed or stranger
+    allow: dict | None  # their allow in force, as allowed.json has it
+    weight: str | None  # the weight in force (WEIGHTS); None for the owner and a stranger
+    until: float | None  # when a weight the owner set runs out; None for good, or for the level's own
+    set: bool  # whether the weight is one the owner set, not the level's
+    item: dict | None  # their item of people.json
+
+
 def shown(value):
     """a value as an error names it: its JSON, cut at 60 letters"""
     text = json.dumps(value, ensure_ascii=False)
@@ -422,7 +449,7 @@ def read_settings(path, identity=AOGO):
             )
     owner_key, users_key = identity.key('OWNER'), identity.key('USERS')
     owner = snowflake(values[owner_key], f'{path}: {owner_key}')
-    users = id_list(path, users_key, values[users_key])
+    users = id_list(path, users_key, values[users_key]) if values.get(users_key) else frozenset()
     channels = id_list(path, channels_key, values[channels_key]) if channels_key in values else None
     limits = []
     for name, (default, low, high) in GREET_LIMITS.items():
@@ -745,26 +772,32 @@ def command_text(settings):
         return ''
     return (
         f'The owner may allow someone else with /{command} allow, for 2 hours, 1 day, 7 days or for good (1 day when '
-        f'he names no time), and take it back with /{command} deny: while allowed they are as a listed user, their '
-        f'messages addressed to {me} and their DMs reach you as kind="message", and when the allow runs out they are '
-        'a stranger again, with no word to them. Each allow and deny comes as a kind="notice" event with user, '
-        'user_id and until (an ISO 8601 time in UTC, "permanent", or "denied"); discord_allowed lists who is allowed '
-        f"and until when. Anyone may use /{command} help, which answers them alone with the greeting's line and how "
-        "to ask you, a stranger within the greeting's limits; it tells you nothing. "
+        f'he names no time), and take it back with /{command} deny: while allowed, their messages addressed to {me} '
+        'and their DMs reach you as kind="message", and when the allow runs out they are a stranger again, with no '
+        f'word to them. He trusts someone with /{command} trust and takes it back with /{command} untrust; '
+        f'{settings.identity.key("USERS")} lists who starts trusted. Of a trusted person 30 messages an hour reach you, '
+        f'of an allowed one 10, unless he set another weight with /{command} weight (mute 0, low 3, normal 10, high '
+        "30, for a time, then the level's again); past it the rest is only counted. Each allow, deny, trust, untrust "
+        'and weight, and a weight running out, comes as a kind="notice" event with user and user_id, and until (an '
+        'ISO 8601 time in UTC, "permanent", or "denied"), trust or weight; discord_allowed lists who is allowed and '
+        f"trusted. Anyone may use /{command} help, which answers them alone with the greeting's line and how to ask "
+        "you, a stranger within the greeting's limits; it tells you nothing. "
     )
 
 
 def instructions(settings):
     """what the server tells the session about itself: how Discord reaches it, pushed or waited for"""
     me = settings.identity.title
-    allowed = (
-        f', of those the owner allowed with /{settings.identity.command} allow' if settings.identity.command else ''
+    command = settings.identity.command
+    allowed = f', of those the owner allowed with /{command} allow' if command else ''
+    users = (
+        f'the people he trusts ({by_id(settings.users)} at the start)' if command else f'users {by_id(settings.users)}'
     )
     said = (
         f'{me} is {settings.identity.who} on Discord. Every post is a draft its owner (Discord user {settings.owner}) '
         f'answers in their DMs with {me}: {YES} posts it as it is, {NO} or no answer posts nothing. It reads and posts '
         f"in {scope(settings)}, and reads the owner's DMs with it. Of what it reads, only the owner's messages, those "
-        f'of users {by_id(settings.users)}{allowed} and its own reach you; the others are counted, but for a message the '
+        f'of {users}{allowed} and its own reach you; the others are counted, but for a message the '
         f'owner let through: one addressed to {me} (a mention, or a reply to one of its messages) that he put '
         f'his :{WIMSY}: reaction on, or any he replied to while mentioning {me}. '
         + greeting_text(settings)
@@ -773,14 +806,15 @@ def instructions(settings):
     )
     if settings.identity.claude:
         return said + (
-            'While the session runs, Discord comes in as <channel> events: kind="message" (from the owner, a listed '
-            f'user{" or one he allowed" if allowed else ""}: a message addressed to {me}, or their DM; when the owner replied to someone while mentioning '
+            'While the session runs, Discord comes in as <channel> events: kind="message" (from the owner, '
+            f'{"a trusted person or one he allowed" if command else "a listed user"}: a message addressed to {me}, or '
+            'their DM; when the owner replied to someone while mentioning '
             f'{me}, the text ends with the message he replied to, and quoted_author and quoted_author_id name its '
             'author), kind="approved" (a stranger\'s addressed message the owner let through with the reaction), '
             f'each with author, author_id, channel, message_id and reply_to; kind="dm" (someone else wrote to {me} in '
             'DMs: their name only), kind="draft" (the owner answered a draft in his DMs, and it was posted or refused '
             'at once: draft, status, channel, and message_id once posted), kind="error" or "notice" (the gateway'
-            + ('; an allow or a deny' if allowed else '')
+            + ('; a change of who reaches you' if command else '')
             + '). '
             + ANSWERING
         )
@@ -1094,7 +1128,62 @@ SHAPES = {
             isinstance(item, list) and len(item) == 3 and stamp(item[0]) and an_id(item[1]) and a_notice(item[2])
         ),
     ),
+    'people': (
+        (
+            '{"id", "name", "trusted": true, false or null, "weight": null or {"level", "since", "until"}, "ice": null or '
+            '{"kind", "since", "until", "thawed"}, "strikes": [[time, kind], ...]}'
+        ),
+        lambda item: a_person(item),
+    ),
+    'heard': (
+        '[time, person id, message id, outcome]',
+        lambda item: (
+            isinstance(item, list)
+            and len(item) == 4
+            and stamp(item[0])
+            and an_id(item[1])
+            and an_id(item[2])
+            and isinstance(item[3], str)
+        ),
+    ),
+    'flags': (
+        '[name, time]',
+        lambda item: isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and stamp(item[1]),
+    ),
 }
+
+
+def a_person(item):
+    """whether a value is a person's state as people.json keeps it"""
+    if not isinstance(item, dict) or set(item) != {'id', 'name', 'trusted', 'weight', 'ice', 'strikes'}:
+        return False
+    weight, ice, strikes = item['weight'], item['ice'], item['strikes']
+    return (
+        an_id(item['id'])
+        and isinstance(item['name'], str)
+        and item['trusted'] in (True, False, None)
+        and (
+            weight is None
+            or isinstance(weight, dict)
+            and set(weight) == {'level', 'since', 'until'}
+            and weight['level'] in WEIGHTS
+            and stamp(weight['since'])
+            and (weight['until'] is None or stamp(weight['until']))
+        )
+        and (
+            ice is None
+            or isinstance(ice, dict)
+            and set(ice) == {'kind', 'since', 'until', 'thawed'}
+            and ice['kind'] in ICE_LINES
+            and stamp(ice['since'])
+            and stamp(ice['until'])
+            and isinstance(ice['thawed'], bool)
+        )
+        and isinstance(strikes, list)
+        and all(
+            isinstance(each, list) and len(each) == 2 and stamp(each[0]) and each[1] in ICE_LINES for each in strikes
+        )
+    )
 
 
 def hours_minutes(seconds):
@@ -1116,7 +1205,7 @@ class Store:
 
     def __init__(self, folder, now=time.time):
         self.folder, self.now = Path(folder), now
-        self.seen = None  # allowed.json as last read: its stat's (inode, mtime, size), and its items
+        self.seen = {}  # a kind's file as last read without the lock: its stat's (inode, mtime, size), its items
 
     @contextlib.contextmanager
     def locked(self):
@@ -1181,18 +1270,21 @@ class Store:
         self.save(kind, kept + [[now, person]])
         return None, hour + 1
 
-    def allowed(self):
-        """the allows in force now, {id: item}, read without the lock (a file is moved in whole) and again only once
-        the file changed"""
+    def cached(self, kind):
+        """a kind's items, read without the lock (a file is moved in whole) and again only once the file changed"""
         try:
-            found = self.path('allowed').stat()
+            found = self.path(kind).stat()
         except FileNotFoundError:
-            return {}
+            return []
         signature = (found.st_ino, found.st_mtime_ns, found.st_size)
-        if self.seen is None or self.seen[0] != signature:
-            self.seen = (signature, self.load('allowed'))
+        if kind not in self.seen or self.seen[kind][0] != signature:
+            self.seen[kind] = (signature, self.load(kind))
+        return self.seen[kind][1]
+
+    def allowed(self):
+        """the allows in force now, {id: item}"""
         now = self.now()
-        return {item['id']: item for item in self.seen[1] if item['until'] is None or item['until'] > now}
+        return {item['id']: item for item in self.cached('allowed') if item['until'] is None or item['until'] > now}
 
 
 def file_name(name, fallback):
@@ -1415,6 +1507,13 @@ def command_list(identity):
 
     times = [{'name': ALLOW_NAMES[value], 'value': value} for value in ALLOW_TIMES]
     time_option = {'type': STRING_OPTION, 'name': 'time', 'description': 'For how long: 1 day without one'}
+    level_option = {
+        'type': STRING_OPTION,
+        'name': 'level',
+        'description': 'How many of their messages an hour reach the session',
+        'required': True,
+        'choices': [{'name': f'{name} ({count} an hour)', 'value': name} for name, count in WEIGHTS.items()],
+    }
     return [
         {
             'type': CHAT_INPUT,
@@ -1440,6 +1539,24 @@ def command_list(identity):
                     'options': [user('Whose allow to take back')],
                 },
                 {'type': SUB_COMMAND, 'name': 'allowed', 'description': 'DraVee only: who is allowed, and until when'},
+                {
+                    'type': SUB_COMMAND,
+                    'name': 'trust',
+                    'description': f'DraVee only: {identity.who} hears someone as trusted, 30 messages an hour',
+                    'options': [user('Who to trust')],
+                },
+                {
+                    'type': SUB_COMMAND,
+                    'name': 'untrust',
+                    'description': "DraVee only: take someone's trust back",
+                    'options': [user('Whose trust to take back')],
+                },
+                {
+                    'type': SUB_COMMAND,
+                    'name': 'weight',
+                    'description': f"DraVee only: how many of someone's messages an hour reach {identity.who}, for a time",
+                    'options': [user('Whose weight to set'), level_option, dict(time_option, choices=times)],
+                },
             ],
         }
     ]
@@ -1516,6 +1633,8 @@ class Wimsy:
         identity = settings.identity
         self.store = Store(state) if identity.greeting or identity.command else None
         self.known = {}  # its own user id, its roles and the owner's DM channel, asked once
+        self.told = set()  # the changes of the people's state this server told its session of, with no event of their
+        # own: (what, person, when)
         self.approved = set()  # the messages the owner let through while the gateway heard: their ids, in memory only
         self.guard = threading.Lock()
         self.drafts = {}  # a lock a draft: one look at a time, so no draft is posted twice
@@ -1546,31 +1665,135 @@ class Wimsy:
         """the people the owner allowed with his command, their allow still running: {id: its item}"""
         return self.store.allowed() if self.settings.identity.command else {}
 
-    def people(self):
-        """whose messages reach the session: the owner, the listed users, and those he allowed"""
-        return self.settings.users | {self.settings.owner} | set(self.allowed())
+    def trusted(self):
+        """the ids trusted now: the env file's list, but those the owner took the trust of, and those he trusted; a
+        bot with no command, its env file's list alone"""
+        if self.store is None:
+            return set(self.settings.users)
+        people = {item['id']: item for item in self.store.cached('people')}
+        listed = {user for user in self.settings.users if (people.get(user) or {}).get('trusted') is not False}
+        return listed | {person for person, item in people.items() if item['trusted']}
+
+    def standing(self, person, now=None, people=None, allows=None):
+        """what a person is to the bot now, from its state as last read (people and allows: the items a change read
+        under the lock)"""
+        settings = self.settings
+        if person == settings.owner:
+            return Standing('owner', None, None, None, False, None)
+        if self.store is None:  # a bot with no command: its env file's list alone, unweighed
+            return Standing('trusted' if person in settings.users else 'stranger', None, None, None, False, None)
+        now = self.store.now() if now is None else now
+        people = self.store.cached('people') if people is None else people
+        allows = self.store.cached('allowed') if allows is None else allows
+        item = next((each for each in people if each['id'] == person), None)
+        allow = next(
+            (each for each in allows if each['id'] == person and (each['until'] is None or each['until'] > now)), None
+        )
+        trusted = item['trusted'] if item and item['trusted'] is not None else person in settings.users
+        level = 'trusted' if trusted else 'allowed' if allow else 'stranger'
+        weight = item['weight'] if item else None
+        if level != 'stranger' and weight and (weight['until'] is None or weight['until'] > now):
+            return Standing(level, allow, weight['level'], weight['until'], True, item)
+        return Standing(level, allow, LEVEL_WEIGHTS.get(level), None, False, item)
 
     def person(self, author):
-        """whether author is one of people(): the state folder is read only for someone neither owner nor listed"""
-        return author == self.settings.owner or author in self.settings.users or author in self.allowed()
+        """whether the author's messages reach the session: the owner, and anyone trusted or allowed whose weight is
+        not mute"""
+        standing = self.standing(author)
+        return standing.level == 'owner' or standing.level != 'stranger' and standing.weight != 'mute'
+
+    def heard_words(self, owned=''):  # owned: OWNED for whose message
+        """who besides the owner reaches the session, as an error names them: owned "'s" for whose message"""
+        ids = by_id(self.trusted()) or 'none'
+        return f'a {"listed" if self.store is None else "trusted"} user{owned} ({ids})'
+
+    def muted(self, author):
+        """why none of a trusted or allowed person's messages reach the session, or None: their weight is mute"""
+        standing = self.standing(author)
+        if standing.level in ('trusted', 'allowed') and standing.weight == 'mute':
+            return f'weighs mute {ran(standing.until, utc)}: none of their messages reach the session'
+        return None
 
     def authors(self, value):
-        """the ids `from` names, each the owner, a listed user or one he allowed; None when it names none"""
+        """the ids `from` names, each the owner, a trusted (a bot with no command: listed) user or one he allowed;
+        None when it names none"""
         if value is None:
             return None
-        owner, users = self.settings.owner, by_id(self.settings.users)
+        owner = self.settings.owner
         if not isinstance(value, list) or not value:
-            raise Refused(
-                f'from is {shown(value)}: a list of 1 or more ids, of the owner ({owner}) or listed users ({users})'
-            )
+            users = f'{"listed" if self.store is None else "trusted"} users ({by_id(self.trusted()) or "none"})'
+            raise Refused(f'from is {shown(value)}: a list of 1 or more ids, of the owner ({owner}) or {users}')
         for place, item in enumerate(value, 1):
             snowflake(item, f'from item {place}')
+            if self.muted(item):
+                raise Refused(f'from item {place} is {item}, who {self.muted(item)}')
             if not self.person(item):
                 raise Refused(
-                    f'from item {place} is {item}, neither the owner ({owner}), a listed user ({users}) nor one he '
-                    'allowed'
+                    f'from item {place} is {item}, neither the owner ({owner}), {self.heard_words()} nor one he allowed'
                 )
         return frozenset(value)
+
+    def intake(self, person, number, kind):
+        """what becomes of a message of a trusted or allowed person (kind message) or one the owner let through
+        (approved), decided once under the state's lock whichever server of the bot hears it first: 'reached', or
+        'counted: weight <level>' past the messages an hour its weight lets reach the session. (outcome, whether this
+        server decided it)"""
+        with self.store.locked():
+            now = self.store.now()
+            heard = [item for item in self.store.load('heard') if item[0] > now - HEARD_FOR]
+            found = next((item for item in heard if item[2] == number), None)
+            if found:
+                return found[3], False
+            standing = self.standing(person, now, self.store.load('people'), self.store.load('allowed'))
+            outcome = 'reached'
+            if kind == 'message' and standing.level == 'stranger':
+                outcome = 'counted: stranger'  # their allow ran out as the message came
+            elif kind == 'message':
+                hour = sum(
+                    1 for when, who, _, said in heard if who == person and said == 'reached' and when > now - 3600
+                )
+                if hour >= WEIGHTS[standing.weight]:
+                    outcome = f'counted: weight {standing.weight}'
+            self.store.save('heard', heard + [[now, person, number, outcome]])
+            return outcome, True
+
+    def hour_of(self, person, now=None):
+        """how many of a person's messages reached the session in the last hour"""
+        now = self.store.now() if now is None else now
+        return sum(
+            1
+            for when, who, _, said in self.store.cached('heard')
+            if who == person and said == 'reached' and when > now - 3600
+        )
+
+    def deprecated_users(self):
+        """the owner's one DM saying the env file's USERS is deprecated, once ever (its flag in the state folder);
+        True when this server sent it"""
+        identity, users = self.settings.identity, self.settings.users
+        if not identity.command or not users:
+            return False
+        with self.store.locked():
+            flags = self.store.load('flags')
+            if any(name == 'users-deprecated' for name, _ in flags):
+                return False
+            self.store.save('flags', flags + [['users-deprecated', self.store.now()]])
+        listed = ', '.join(f'<@{user}>' for user in sorted(users, key=int))
+        command = identity.command
+        text = (
+            f'{identity.key("USERS")} is deprecated: the people it lists ({listed}) start trusted, and /{command} '
+            f'trust, untrust, allow, deny and weight say who reaches me now. It is still read; take its line out of the '
+            'env file when you like.'
+        )
+        try:
+            self.discord(
+                'POST', f'/channels/{self.dm()}/messages', {'content': text, 'allowed_mentions': {'parse': []}}
+            )
+        except DiscordError:
+            with self.store.locked():  # said again at the next start
+                self.store.save('flags', [each for each in self.store.load('flags') if each[0] != 'users-deprecated'])
+            raise
+        log(f'deprecated: the owner was told {identity.key("USERS")} is deprecated')
+        return True
 
     def where(self, channel, reading):
         """the channel the bot may post in, or read: listed, a thread of a listed one, any Discord lets it see when
@@ -1779,13 +2002,14 @@ class Wimsy:
         query = {'limit': limit} | ({'after': after} if after else {})
         page = sorted(self.discord('GET', f'/channels/{channel}/messages', **query), key=lambda m: int(m['id']))
         me = self.me()
-        heard = named if named is not None else self.people() | {me}
         roles = self.roles()
         quoted = self.approved | {quoting(m, self.settings.owner, me, roles) for m in page}
-        kept = []
+        kept, heard = [], {}
         for message in page:
             author = message['author']['id']
-            if author in heard:
+            if author not in heard:
+                heard[author] = author in named if named is not None else author == me or self.person(author)
+            if heard[author]:
                 kept.append(view(message))
             elif named is None and author != me and (message['id'] in quoted or self.let_through(channel, message, me)):
                 kept.append(view(message, approved=True))
@@ -1818,10 +2042,14 @@ class Wimsy:
         roles = self.roles()
         if message['id'] in {quoting(m, self.settings.owner, me, roles) for m in later}:
             return
+        if self.muted(message['author']['id']):
+            raise Refused(
+                f'message {message["id"]} is not one {self.title} gives: its author {self.muted(message["author"]["id"])}'
+            )
         raise Refused(
-            f"message {message['id']} is not one {self.title} gives: neither the owner's ({self.settings.owner}), a listed "
-            f"user's ({by_id(self.settings.users)}) nor its own, and the owner has not let it through (his :{WIMSY}: "
-            f'reaction, or his reply to it mentioning {self.title})'
+            f"message {message['id']} is not one {self.title} gives: neither the owner's ({self.settings.owner}), "
+            f'{self.heard_words(OWNED)} nor its own, and the owner has not let it through (his :{WIMSY}: reaction, or his '
+            f'reply to it mentioning {self.title})'
         )
 
     def attachments(self, args, cancelled, progress):
@@ -2056,18 +2284,99 @@ class Wimsy:
         target = values.get('user')
         if not an_id(target):
             return f'user is {shown(target)}, not a member: /{command} {sub} takes one.', None
-        if target == settings.owner:
+        if target == settings.owner and sub in ('allow', 'deny'):
             return f'<@{target}> is the owner: his messages always reach the session.', None
-        if target in settings.users:
-            return (
-                f'<@{target}> is listed in {settings.identity.key("USERS")}: their messages always reach the session, '
-                'and the env file takes them out.'
-            ), None
+        if target == settings.owner:
+            return f'<@{target}> is the owner: never limited, trusted or iced.', None
         if target == self.me():
             return f'<@{target}> is {self.title} itself.', None
+        name = member_name(event, target)
         if sub == 'allow':
-            return self.allow(target, member_name(event, target), values.get('time'), now)
-        return self.deny(target, now)
+            return self.allow(target, name, values.get('time'), now)
+        if sub == 'deny':
+            return self.deny(target, now)
+        if sub in ('trust', 'untrust'):
+            return self.trust(target, name, sub == 'trust', now)
+        return self.weigh(target, name, values.get('level'), values.get('time'), now)
+
+    def person_item(self, people, target, name):
+        """a person's item of people, made when they have none, its name the one the server shows now"""
+        item = next((each for each in people if each['id'] == target), None)
+        if item is None:
+            item = {'id': target, 'name': name, 'trusted': None, 'weight': None, 'ice': None, 'strikes': []}
+            people.append(item)
+        item['name'] = name
+        return item
+
+    def reach(self, standing, shown_as, whom):
+        """how a person's messages reach whom (you, the session) now, in words"""
+        if standing.level == 'stranger':
+            return f"their messages are a stranger's: none reaches {whom}"
+        count = WEIGHTS[standing.weight]
+        said = f'{count} of their messages an hour reach {whom} (weight {standing.weight}'
+        said += f' until {shown_as(standing.until)})' if standing.set and standing.until is not None else ')'
+        if standing.level == 'allowed':
+            said += f', allowed {ran(standing.allow["until"], shown_as)}'
+        return said
+
+    def trust(self, target, name, value, now):
+        """under the state's lock: the owner's trust, or its taking back"""
+        people, allows = self.store.load('people'), self.store.load('allowed')
+        before = self.standing(target, now, people, allows)
+        if (before.level == 'trusted') == value:
+            return f'<@{target}> is {"trusted already" if value else "not trusted"}.', None
+        self.person_item(people, target, name)['trusted'] = value
+        self.store.save('people', people)
+        after = self.standing(target, now, people, allows)
+        if value:
+            answer = f'<@{target}> is trusted: {self.reach(after, when_markup, "the session")}.'
+            text = f'The owner trusted {name} ({target}): {self.reach(after, utc, "you")}.'
+        else:
+            answer = f'<@{target}> is not trusted anymore: {self.reach(after, when_markup, "the session")}.'
+            text = f'The owner took back the trust of {name} ({target}): {self.reach(after, utc, "you")}.'
+        meta = {'kind': 'notice', 'user': name, 'user_id': target, 'trust': after.level}
+        return answer, {'text': text, 'meta': meta}
+
+    def weigh(self, target, name, level, time_value, now):
+        """under the state's lock: the weight the owner sets a trusted or allowed person to, for a time"""
+        people, allows = self.store.load('people'), self.store.load('allowed')
+        before = self.standing(target, now, people, allows)
+        command = self.settings.identity.command
+        if before.level == 'stranger':
+            return (
+                f'<@{target}> is a stranger: none of their messages reach the session to weigh; /{command} trust or '
+                'allow them first.'
+            ), None
+        was = f'<@{target}> weighs {before.weight}, {WEIGHTS[before.weight]} of their messages an hour, as before.'
+        if level not in WEIGHTS:
+            return f'level is {shown(level)}, not one of {", ".join(WEIGHTS)}: {was}', None
+        time_value = ALLOW_DEFAULT if time_value is None else time_value
+        if time_value not in ALLOW_TIMES:
+            return f'time is {shown(time_value)}, not one of {", ".join(ALLOW_TIMES)}: {was}', None
+        seconds = ALLOW_TIMES[time_value]
+        until = None if seconds is None else now + seconds
+        self.person_item(people, target, name)['weight'] = {'level': level, 'since': now, 'until': until}
+        self.store.save('people', people)
+        back = LEVEL_WEIGHTS[before.level]
+
+        def then(shown_as):
+            if until is None:
+                return 'for good, until a new weight'
+            return f'until {shown_as(until)}; then {back} again, {WEIGHTS[back]} an hour, as {before.level} people have'
+
+        answer = f'<@{target}> weighs {level}: {WEIGHTS[level]} of their messages an hour reach the session, {then(when_markup)}.'
+        text = f'The owner set {name} ({target}) to weight {level}: {WEIGHTS[level]} of their messages an hour reach you, {then(utc)}.'
+        if before.set:
+            answer += f' It was {before.weight} {ran(before.until, when_markup)} before.'
+            text += f' It was {before.weight} {ran(before.until, utc)} before.'
+        meta = {
+            'kind': 'notice',
+            'user': name,
+            'user_id': target,
+            'weight': level,
+            'until': 'permanent' if until is None else utc(until),
+        }
+        return answer, {'text': text, 'meta': meta}
 
     def in_force(self, now):
         """under the state's lock: the allows not run out at now, read for a change"""
@@ -2085,16 +2394,19 @@ class Wimsy:
         items = self.in_force(now)
         before = next((item for item in items if item['id'] == target), None)
         items = [item for item in items if item['id'] != target]
-        self.store.save('allowed', items + [{'id': target, 'name': name, 'since': now, 'until': until}])
+        items.append({'id': target, 'name': name, 'since': now, 'until': until})
+        self.store.save('allowed', items)
+        after = self.standing(target, now, self.store.load('people'), items)
         if until is None:
             answer, span = 'for good, until you deny them', 'for good, until he denies them'
         else:
             answer, span = f'until {when_markup(until)}', f'until {utc(until)} ({ALLOW_NAMES[time_value]})'
+        count = f'{WEIGHTS[after.weight]} an hour (weight {after.weight}{", as one trusted" if after.level == "trusted" else ""})'
         text = (
-            f'The owner allowed {name} ({target}) {span}: their messages addressed to {self.title} reach you as a '
-            "listed user's do, and discord_allowed lists them."
+            f'The owner allowed {name} ({target}) {span}: their messages addressed to {self.title} reach you, '
+            f'{count}, and discord_allowed lists them.'
         )
-        answer = f'<@{target}> is allowed {answer}: their messages to me reach the session.'
+        answer = f'<@{target}> is allowed {answer}: their messages to me reach the session, {count}.'
         if before:
             text += f' It ran {ran(before["until"], utc)} before.'
             answer += f' It ran {ran(before["until"], when_markup)} before.'
@@ -2110,6 +2422,11 @@ class Wimsy:
         items = self.in_force(now)
         before = next((item for item in items if item['id'] == target), None)
         if before is None:
+            if target in self.trusted():
+                return (
+                    f'<@{target}> has no allow to take back; they are trusted, which /{self.settings.identity.command} untrust takes.',
+                    None,
+                )
             return f'<@{target}> has no allow to take back.', None
         self.store.save('allowed', [item for item in items if item['id'] != target])
         name = before['name']
@@ -2125,8 +2442,8 @@ class Wimsy:
         """the allows in force as the owner's answer: each one's mention, name and end, then the listed users"""
         found = sorted(self.allowed().values(), key=lambda item: (item['until'] is None, item['until'] or 0))
         lines = [f'<@{item["id"]}> ({item["name"]}): {ran(item["until"], when_markup)}' for item in found]
-        listed = ', '.join(f'<@{user}>' for user in sorted(self.settings.users, key=int))
-        tail = [f'Listed in {self.settings.identity.key("USERS")}, always: {listed}']
+        trusted = ', '.join(f'<@{user}>' for user in sorted(self.trusted(), key=int)) or 'no one'
+        tail = [f'Trusted: {trusted}']
         head = ['Allowed:'] if lines else ['No one is allowed now.']
         kept = len(lines)
         while True:  # past a message's letters, the last ones go: discord_allowed lists them all
@@ -2175,7 +2492,12 @@ class Wimsy:
             }
             for item in found
         ]
-        return {'allowed': allowed, 'listed': sorted(self.settings.users, key=int), 'now': utc(self.store.now())}
+        return {
+            'allowed': allowed,
+            'trusted': sorted(self.trusted(), key=int),
+            'listed': sorted(self.settings.users, key=int),
+            'now': utc(self.store.now()),
+        }
 
     def emoji_upload(self, args, cancelled, progress):
         take(args, 'discord_emoji_upload', ('guild', 'name'), ())
@@ -2596,6 +2918,8 @@ class Ear:
         self.kinds = {}  # a channel's id: its type and parent, from the gateway or asked once
         self.knocked = set()  # strangers whose DM was told
         self.told_uses = set()  # the uses of the command whose notice the session got from this server
+        self.started = tools.store.now() if tools.store else 0.0  # what ran out before it is not told
+        self.trouble = None  # the last failure of a look at the people's state, said once
 
     def feed(self, kind, data):
         """from the gateway's thread: never waits on Discord's REST there. A use of the command is answered in a
@@ -2606,12 +2930,62 @@ class Ear:
             self.queue.put((kind, data))
 
     def run(self):
+        self.once()
+        looked = time.monotonic()
         while not self.stop.is_set():
+            if self.tools.store and time.monotonic() - looked >= TICK:
+                looked = time.monotonic()
+                self.tick()
             try:
                 kind, data = self.queue.get(timeout=STOP_LOOK)
             except queue.Empty:
                 continue
             self.sort(kind, data)
+
+    def once(self):
+        """what the bot says once at its start: the env file's USERS deprecated, to the owner"""
+        try:
+            self.tools.deprecated_users()
+        except (DiscordError, Refused, OSError) as error:
+            key = self.tools.settings.identity.key('USERS')
+            log(f'deprecated: the owner could not be told {key} is deprecated: {error}')
+            self.push(
+                f'{self.title} could not tell the owner that {key} is deprecated: {error}; it tries again at its next '
+                'start',
+                {'kind': 'error'},
+            )
+
+    def tick(self):
+        """what changed in the people's state with no event of its own, told to the session once: a weight the owner
+        set that ran out"""
+        store, now = self.tools.store, self.tools.store.now()
+        try:
+            people = store.cached('people')
+        except (Refused, OSError) as error:
+            said = f"{self.title} could not look at the people's state: {error}"
+            if said != self.trouble:
+                self.trouble = said
+                log(f'people: {error}')
+                self.push(said, {'kind': 'error'})
+            return
+        self.trouble = None
+        for item in people:
+            weight = item['weight']
+            if not weight or weight['until'] is None or not self.started <= weight['until'] <= now:
+                continue
+            key = ('weight', item['id'], weight['until'])
+            if key in self.tools.told:
+                continue
+            self.tools.told.add(key)
+            after = self.tools.standing(item['id'], now)
+            text = f'The weight {weight["level"]} the owner set for {item["name"]} ({item["id"]}) ran out at {utc(weight["until"])}: '
+            if after.level == 'stranger':
+                text += "their messages are a stranger's, and none reaches you"
+            else:
+                text += f'back to {after.weight}, {WEIGHTS[after.weight]} of their messages an hour, as {after.level} people have'
+            meta = {'kind': 'notice', 'user': item['name'], 'user_id': item['id'], 'weight': after.weight or 'none'}
+            self.push(text, dict(meta, until='ran out'))
+            self.told('notice')
 
     def sort(self, kind, data):
         """one event heard; its failure said to stderr and the session, and the ear goes on"""
@@ -2674,10 +3048,12 @@ class Ear:
         me, author = self.tools.me(), message['author']['id']
         if author == me:
             return
-        settings = self.tools.settings
+        level = self.tools.standing(author).level
         if not message.get('guild_id'):
-            if self.tools.person(author):
+            if level == 'owner':
                 self.tell(message, 'message')
+            elif level != 'stranger':
+                self.admit(message, 'message', level)
             elif author not in self.knocked:
                 self.knocked.add(author)
                 name = message['author'].get('global_name') or message['author'].get('username') or ''
@@ -2685,18 +3061,15 @@ class Ear:
                 self.push(text, {'kind': 'dm', 'author': name, 'author_id': author})
                 self.told('dm')
             return
-        channel = message['channel_id']
-        if author != settings.owner and author not in settings.users:
-            # someone else: an addressed call alone is looked at, so the allows are read for it alone
-            if not addressed(message, me, self.tools.roles()) or not self.in_scope(channel):
-                return
-            if author in self.tools.allowed():
-                self.tell(message, 'message')
-            elif settings.identity.greeting and self.calls(message):
-                self.greet(message)
+        channel, roles = message['channel_id'], self.tools.roles()
+        if not addressed(message, me, roles) or not self.in_scope(channel):
             return
-        roles = self.tools.roles()
-        if addressed(message, me, roles) and self.in_scope(channel):
+        if level == 'stranger':
+            if self.tools.settings.identity.greeting and self.calls(message):
+                self.greet(message)
+        elif level != 'owner':
+            self.admit(message, 'message', level)
+        else:
             quoted, number = None, quoting(message, self.tools.settings.owner, me, roles)
             if number:
                 self.tools.approved.add(number)
@@ -2705,6 +3078,28 @@ class Ear:
                 else:
                     quoted = self.tools.discord('GET', f'/channels/{channel}/messages/{number}')
             self.tell(message, 'message', quoted)
+
+    def admit(self, message, kind, level):
+        """a message of a trusted or allowed person, or one the owner let through, told to the session when its
+        weight lets it reach the session, else only counted; a state file it cannot read stops it, said"""
+        if self.tools.store is None:  # a bot with no command weighs no one
+            self.tell(message, kind)
+            return
+        channel = message['channel_id']
+        try:
+            outcome, _ = self.tools.intake(message['author']['id'], message['id'], kind)
+        except (Refused, OSError) as error:
+            log(f'channel: a {kind} event in channel {channel} could not be weighed: {error}')
+            self.push(
+                f'{self.title} could not weigh message {message["id"]} in channel {channel}, so it did not reach you: '
+                f'{error}',
+                {'kind': 'error'},
+            )
+            return
+        if outcome == 'reached':
+            self.tell(message, kind)
+        else:
+            log(f'channel: a {kind} event in channel {channel} is not told: {outcome}')
 
     def calls(self, message):
         """whether a stranger's message addressed to the bot where it reads is a person's call it greets: not a
@@ -2794,7 +3189,7 @@ class Ear:
         if not self.in_scope(channel):
             return
         self.tools.approved.add(number)
-        self.tell(dict(message, channel_id=channel), 'approved')
+        self.admit(dict(message, channel_id=channel), 'approved', 'stranger')
 
     def drafted(self, draft):
         """the owner's check mark or cross on a waiting draft: it is posted or refused now, not on a tool's next look,
