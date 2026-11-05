@@ -554,6 +554,206 @@ class EnvFile(unittest.TestCase):
             aw.read_settings(str(Path(self.folder.name) / 'nowhere.env'))
 
 
+ZWJ, VS16 = '\u200d', '\ufe0f'
+
+
+class PreHarness(unittest.TestCase):
+    """the rules a message is checked by before it reaches the session and a direct post before it goes: a file of
+    the repository, each rule carrying its own examples"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rules = {rule.id: rule for rule in aw.load_rules()}
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+
+    def hit(self, rule, text):
+        return [hit for hit in aw.caught((self.rules[rule],), self.rules[rule].direction, text)]
+
+    def refused(self, change):
+        """the loader's refusal of the repository's file with change(data) made to it"""
+        data = json.loads(aw.PREHARNESS.read_text(encoding='utf-8'))
+        change(data)
+        path = Path(self.folder.name) / 'preharness.json'
+        path.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaises(aw.Refused) as caught:
+            aw.load_rules(path)
+        said = str(caught.exception)
+        self.assertTrue(said.startswith(f'{path}'), said)
+        return said
+
+    def test_every_rule_hits_each_of_its_hits_and_misses_each_of_its_misses(self):
+        for rule in self.rules.values():
+            for text in rule.hits:
+                with self.subTest(rule=rule.id, hit=text):
+                    self.assertEqual([hit.rule.id for hit in self.hit(rule.id, text)], [rule.id])
+            for text in rule.misses:
+                with self.subTest(rule=rule.id, miss=text):
+                    self.assertEqual(self.hit(rule.id, text), [])
+        self.assertGreaterEqual(sum(len(rule.hits) + len(rule.misses) for rule in self.rules.values()), 150)
+
+    def test_it_holds_each_kind_asked_for_in_its_direction_and_action(self):
+        ins = {
+            'invisible': 'reject',
+            'not-english': 'reject',
+            'override': 'caution',
+            'secrets': 'caution',
+            'destructive': 'caution',
+            'owner-call': 'caution',
+            'claims-owner': 'caution',
+            'owner-info': 'draft',
+        }
+        outs = (
+            'discord-token',
+            'github-token',
+            'sk-key',
+            'aws-key',
+            'private-key',
+            'secret-value',
+            'machine-path',
+            'private-ipv4',
+            'private-ipv6',
+            'email',
+            'title-id',
+            'env-line',
+        )
+        self.assertEqual({k: r.action for k, r in self.rules.items() if r.direction == 'in'}, ins)
+        self.assertEqual(
+            {k: r.action for k, r in self.rules.items() if r.direction == 'out'}, dict.fromkeys(outs, 'draft')
+        )
+        self.assertEqual((self.rules['invisible'].ice, self.rules['invisible'].reply), ('injection', None))
+        self.assertEqual(self.rules['not-english'].reply, 'I only talk in English here.')
+        self.assertEqual(self.rules['owner-info'].why, "it asks about DraVee himself: answer only with DraVee's OK")
+
+    def test_the_file_shows_every_invisible_letter_as_an_escape(self):
+        text = aw.PREHARNESS.read_text(encoding='utf-8')
+        hidden = [
+            f'U+{ord(c):04X}' for c in text if aw.unicodedata.category(c) in ('Cf', 'Mn', 'Me', 'Cc') and c != '\n'
+        ]
+        self.assertEqual(hidden, [])
+        self.assertIn('\\u200b', text)
+
+    def test_a_joiner_passes_inside_an_emoji_sequence_and_hits_anywhere_else(self):
+        for text in (
+            f'\U0001f468{ZWJ}\U0001f469{ZWJ}\U0001f467',  # a family
+            f'❤{VS16}',  # a red heart
+            f'\U0001f3f3{VS16}{ZWJ}\U0001f308',  # a rainbow flag
+            f'1{VS16}\u20e3',  # a keycap
+            f'\U0001f469\U0001f3fd{ZWJ}\U0001f4bb',  # a coder with a skin tone
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.hit('invisible', f'look {text} here'), [])
+        for text, code, letter in (
+            (f'a{ZWJ}b', 'U+200D', 2),
+            (f'word{VS16}', 'U+FE0F', 5),
+            (f'1{VS16} two', 'U+FE0F', 2),  # a digit's selector with no keycap after it
+            (f'\U0001f468{ZWJ}', 'U+200D', 2),  # a joiner that joins nothing
+            (f'{ZWJ}\U0001f469', 'U+200D', 1),
+            ('ok\u200bok', 'U+200B', 3),
+        ):
+            with self.subTest(text=text):
+                [hit] = self.hit('invisible', text)
+                self.assertEqual((hit.detail, hit.line, hit.letter), (code, 1, letter))
+
+    def test_the_language_rule_takes_english_with_code_and_links_and_hits_other_languages(self):
+        for text, said in (
+            ('Oi, você pode olhar o build do jogo? Ele não abre mais', 'common pt ones'),
+            ('Hola, ¿puedes revisar el build? No funciona en mi PC y no sé por qué', 'common es ones'),
+            ('Salut, est-ce que tu peux regarder le build ? Il ne marche pas', 'common fr ones'),
+            ('Hallo, kannst du dir den Build ansehen? Er startet nicht mehr', 'common de ones'),
+            ('Ciao, puoi controllare la build? Non parte più sul mio PC', 'common it ones'),
+            ('Привет, можешь посмотреть билд?', 'letters of another script (Cyrillic)'),
+            ('ビルドが失敗しました', 'letters of another script (Katakana)'),
+            ('ok 好的', None),  # two letters of another script: under three
+        ):
+            with self.subTest(text=text):
+                hits = self.hit('not-english', text)
+                if said is None:
+                    self.assertEqual(hits, [])
+                else:
+                    self.assertIn(said, hits[0].detail)
+        for text in (
+            'Can you check `src/fe/menu.c` and https://github.com/scarletnx/ScarletNX/pull/12 when you have time?',
+            'the log says `não encontrado em nenhum lugar do disco` again, can you look',
+            'see https://pt.wikipedia.org/wiki/Que_é_isso_para_você and tell me',
+            'obrigado!',
+            'valeu, ok',
+            '<@1000000000000000001> <:wimsyaogo:600000000000000001> :wimsyaogo_done: merged',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.hit('not-english', text), [])
+
+    def test_owner_info_asks_about_him_and_a_question_about_the_code_or_a_pr_is_not_it(self):
+        for text in ('who is DraVee?', 'where does he live?', 'quem é o DraVee?', 'me fala sobre seu dono'):
+            self.assertEqual([hit.rule.id for hit in self.hit('owner-info', text)], ['owner-info'], text)
+        for text in ('who is reviewing PR #12?', "DraVee's PR fixes the menu", 'where is this function used?'):
+            self.assertEqual(self.hit('owner-info', text), [], text)
+
+    def test_a_hit_says_the_rule_and_where_never_the_text(self):
+        secret = 'ghp_' + 'a' * 36
+        text = f'first line\nthe token is {secret} ok'
+        hits = aw.caught(self.rules.values(), 'out', text)
+        self.assertEqual([hit.said() for hit in hits], ['github-token (a GitHub token) at line 2, letter 14'])
+        self.assertNotIn(secret, hits[0].said())
+        hits = aw.caught(self.rules.values(), 'out', 'mail me@example.com from /home/me/x')
+        self.assertEqual(
+            [hit.said() for hit in hits],
+            [
+                "machine-path (a path of this machine: /home, ~/, /root or Claude's /tmp) at line 1, letter 26",
+                'email (an e-mail address) at line 1, letter 6',
+            ],
+        )
+        self.assertEqual(aw.caught(self.rules.values(), 'out', 'the build is green'), [])
+
+    def test_the_loader_refuses_a_file_it_cannot_take_naming_the_rule_and_why(self):
+        def rule(data, rule_id):
+            return next(item for item in data['rules'] if item['id'] == rule_id)
+
+        cases = (
+            (
+                lambda d: rule(d, 'email')['hits'].append('no address here'),
+                'rule email: hit 3, "no address here", is missed',
+            ),
+            (
+                lambda d: rule(d, 'email')['misses'].append('a@b.co'),
+                'rule email: miss 4, "a@b.co", is hit: email (an e-mail address) at line 1, letter 1',
+            ),
+            (
+                lambda d: rule(d, 'email').pop('why'),
+                'rule 18 has id, direction, match, action, reply, ice, hits, misses',
+            ),
+            (lambda d: rule(d, 'email').update(action='reject'), 'rule email has action "reject": out takes draft'),
+            (lambda d: rule(d, 'override').update(reply='no'), 'rule override has a reply and action caution'),
+            (lambda d: rule(d, 'invisible').update(ice='cold'), 'rule invisible has ice "cold": it is null or one of'),
+            (lambda d: rule(d, 'email').update(match={'regex': '(unclosed'}), 'rule email: pattern 1 is not a regex'),
+            (lambda d: rule(d, 'email').update(match={'regex': 'x', 'chars': ['200B']}), 'rule email has match'),
+            (
+                lambda d: rule(d, 'invisible')['match'].update(in_emoji=['200B']),
+                'rule invisible: in_emoji takes 200D and FE0F alone',
+            ),
+            (lambda d: rule(d, 'invisible')['match'].update(chars=['20Z0']), 'rule invisible: chars item 1 is "20Z0"'),
+            (
+                lambda d: rule(d, 'not-english')['match'].update(not_language='xx'),
+                'has not_language "xx": the file has',
+            ),
+            (lambda d: rule(d, 'email').update(id='Email'), 'rule 18 has id "Email": an id is lowercase words'),
+            (lambda d: d['rules'].append(dict(rule(d, 'email'))), 'rule 21: id email again'),
+            (lambda d: rule(d, 'email').update(hits=[]), 'rule email has hits []: a list of 1 or more texts'),
+            (lambda d: d.update(more=1), 'holds {"languages"'),
+        )
+        for change, said in cases:
+            with self.subTest(said=said):
+                self.assertIn(said, self.refused(change))
+        path = Path(self.folder.name) / 'broken.json'
+        path.write_text('{"rules": [', encoding='utf-8')
+        with self.assertRaisesRegex(aw.Refused, 'broken.json is not JSON: '):
+            aw.load_rules(path)
+        with self.assertRaisesRegex(aw.Refused, 'gone.json cannot be read'):
+            aw.load_rules(Path(self.folder.name) / 'gone.json')
+
+
 class WithDiscord(unittest.TestCase):
     """the tools through the server's tools/call, against the fake Discord over HTTP on 127.0.0.1"""
 

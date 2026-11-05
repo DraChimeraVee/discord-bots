@@ -92,6 +92,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -290,6 +291,31 @@ HELLO_WAIT = 30.0  # seconds the gateway has to say hello
 STOP_LOOK = 0.5  # seconds the gateway reads at most before looking whether the bot stops
 MOST_FRAME = 64 << 20  # bytes a gateway message may have
 WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'  # RFC 6455's, for Sec-WebSocket-Accept
+# The ice (DraVee, 2026-11-05: "gelo" ... "diferente mensagens de gelo de acordo com o que foi feito, inclusive
+# podendo chamar admin"): each kind's fixed line, the server's and never the session's, and whether it pings the
+# server's admin role beside the owner
+ICE_LINES = {
+    'harness': ("I didn't like that one, and I won't do it without DraVee's OK.", False),
+    'owner-call': ("That one is DraVee's call, and I've told him.", False),
+    'secret': ("I don't share that.", True),
+    'abuse': ('Not here.', True),
+    'injection': ('I only take instructions from DraVee.', False),
+}
+# The pre-harness (DraVee, 2026-11-05: "do not share data without permission, tipo um pre harness"; "Pode fazer um
+# database pra esses pre harness, pra a gente ir colocando"): rules a message is checked by before it reaches the
+# session (in) and a direct post before it goes (out), in a file of the repository, each carrying the examples it
+# must hit and miss
+PREHARNESS = Path(__file__).resolve().parent / 'preharness.json'
+RULE_KEYS = ('id', 'direction', 'match', 'action', 'reply', 'ice', 'why', 'hits', 'misses')
+ACTIONS = {'in': ('reject', 'caution', 'draft'), 'out': ('draft',)}  # what a hit does, by direction
+MATCHES = ('regex', 'chars', 'not_language')
+JOINERS = (0x200D, 0xFE0F)  # the zero-width joiner and the emoji variation selector, which emoji sequences use
+OTHER_SCRIPT = 3  # letters of a script other than Latin that make a text another language than English
+FEW_WORDS = 4  # a text of fewer words is not judged by its words
+# what is not a word of the text's language: code, links, Discord's mentions, times and emojis
+NOT_WORDS = re.compile(
+    r'```.*?(?:```|$)|`[^`\n]*`|https?://\S+|<a?:\w+:\d+>|<[@#][!&]?\d+>|<t:\d+(?::\w)?>|:\w+:', re.DOTALL
+)
 
 
 class Refused(Exception):
@@ -420,6 +446,255 @@ def id_list(path, key, value):
             raise Refused(f'{path}: {key} has an empty item, number {place} of {len(items)}: write id,id')
         snowflake(item, f'{path}: {key} item {place}')
     return frozenset(items)
+
+
+class Rule(NamedTuple):
+    """one rule of the pre-harness, as its file has it, with find(text): (offset or None, detail) on a hit, else
+    None"""
+
+    id: str
+    direction: str
+    action: str
+    reply: str | None
+    ice: str | None
+    why: str
+    find: object
+    hits: tuple
+    misses: tuple
+
+
+class Hit(NamedTuple):
+    """a rule a text hits, and where: line and letter from 1 (None for the whole text), and what was found, never
+    the text itself"""
+
+    rule: Rule
+    line: int | None
+    letter: int | None
+    detail: str | None
+
+    def said(self):
+        where = f' at line {self.line}, letter {self.letter}' if self.line else ''
+        return f'{self.rule.id} ({self.rule.why}{": " + self.detail if self.detail else ""}){where}'
+
+
+def example(text):
+    """an example of a rule as an error names it: its JSON, escapes and all, cut at 60 letters"""
+    said = json.dumps(text)
+    return said if len(said) <= 60 else said[:57] + '...'
+
+
+def emoji_part(letter):
+    """whether a letter is part of an emoji: a pictograph, a symbol, a skin tone or the variation selector"""
+    code = ord(letter)
+    return (
+        unicodedata.category(letter) == 'So'
+        or 0x1F000 <= code <= 0x1FAFF
+        or code == 0xFE0F
+        or 0x1F3FB <= code <= 0x1F3FF
+    )
+
+
+def in_emoji(text, at):
+    """whether the joiner at text[at] sits inside an emoji sequence: after an emoji (or a keycap's digit, before its
+    U+20E3), and a zero-width joiner before another emoji"""
+    before = text[at - 1] if at else ''
+    after = text[at + 1] if at + 1 < len(text) else ''
+    if ord(text[at]) == 0xFE0F:
+        return bool(before) and (emoji_part(before) or (before in '0123456789#*' and after == '\u20e3'))
+    return bool(before) and bool(after) and emoji_part(before) and emoji_part(after) and ord(after) != 0xFE0F
+
+
+def odd_letters(banned, joiners):
+    """find for a rule of letters: the first banned letter, a joiner inside an emoji sequence passing"""
+
+    def find(text):
+        for at, letter in enumerate(text):
+            code = ord(letter)
+            if code in banned and not (code in joiners and in_emoji(text, at)):
+                return at, f'U+{code:04X}'
+        return None
+
+    return find
+
+
+def words_of(text):
+    """the text's words as the language rule weighs them, lowercase, with code, links, mentions and emojis left out;
+    and the letters of another script than Latin, each (offset, letter)"""
+    plain = NOT_WORDS.sub(lambda found: ' ' * len(found.group()), text)  # offsets stay the text's
+    others = [
+        (at, letter)
+        for at, letter in enumerate(plain)
+        if letter.isalpha() and not unicodedata.name(letter, '').startswith('LATIN')
+    ]
+    # an apostrophe inside a word keeps it whole: English's what's and don't, French's c'est
+    return re.findall(r"[^\W\d_]+(?:['\u2019][^\W\d_]+)*", plain.lower().replace('\u2019', "'")), others
+
+
+def other_language(languages, want):
+    """find for a not_language rule: OTHER_SCRIPT letters of another script than Latin, or, in a text of FEW_WORDS
+    words or more, more of some other language's common words than of want's, two at least"""
+    sets = {code: frozenset(words) for code, words in languages.items()}
+
+    def find(text):
+        words, others = words_of(text)
+        if len(others) >= OTHER_SCRIPT:
+            script = unicodedata.name(others[0][1], 'another').split(' ')[0].title()
+            return others[0][0], f'{len(others)} letters of another script ({script})'
+        if len(words) < FEW_WORDS:
+            return None
+        counts = {code: sum(word in found for word in words) for code, found in sets.items()}
+        most, code = max((count, code) for code, count in counts.items() if code != want)
+        if most >= 2 and most > counts[want]:
+            return None, f'{most} of its {len(words)} words are common {code} ones, {counts[want]} {want} ones'
+        return None
+
+    return find
+
+
+def regex_finder(patterns):
+    """find for a regex rule: the first match of any of its patterns, its text never said"""
+
+    def find(text):
+        found = [match.start() for match in (pattern.search(text) for pattern in patterns) if match]
+        return (min(found), None) if found else None
+
+    return find
+
+
+def hex_letters(items, where):
+    """the code points of a chars list ("200B", "2060-2064"), or Refused naming the item"""
+    codes = set()
+    if not isinstance(items, list) or not items:
+        raise Refused(f'{where} is {example(items)}, not a list of code points such as "200B" or "2060-2064"')
+    for place, item in enumerate(items, 1):
+        found = re.fullmatch(r'([0-9A-F]{4,6})(?:-([0-9A-F]{4,6}))?', item) if isinstance(item, str) else None
+        if not found or int(found.group(2) or found.group(1), 16) < int(found.group(1), 16):
+            raise Refused(
+                f'{where} item {place} is {example(item)}, not a code point ("200B") or a range ("2060-2064")'
+            )
+        codes.update(range(int(found.group(1), 16), int(found.group(2) or found.group(1), 16) + 1))
+    return codes
+
+
+def rule_of(item, languages, named):
+    """one rule of the pre-harness file, checked, its examples run; Refused naming what is wrong"""
+    if not isinstance(item, dict) or set(item) != set(RULE_KEYS):
+        keys = ', '.join(RULE_KEYS)
+        got = ', '.join(item) if isinstance(item, dict) else f'a JSON {kind_of(item)}'
+        raise Refused(f'{named} has {got}: a rule has {keys}')
+    if not isinstance(item['id'], str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', item['id']):
+        raise Refused(f'{named} has id {example(item["id"])}: an id is lowercase words joined by "-"')
+    named = f'rule {item["id"]}'
+    direction, action = item['direction'], item['action']
+    if direction not in ACTIONS:
+        raise Refused(f'{named} has direction {example(direction)}: it is "in" or "out"')
+    if action not in ACTIONS[direction]:
+        raise Refused(f'{named} has action {example(action)}: {direction} takes {", ".join(ACTIONS[direction])}')
+    for key in ('reply', 'ice'):
+        if item[key] is not None and action != 'reject':
+            raise Refused(f'{named} has a {key} and action {action}: only a rule that rejects answers or ices')
+    if item['reply'] is not None and (not isinstance(item['reply'], str) or not item['reply'].strip()):
+        raise Refused(f'{named} has reply {example(item["reply"])}: a fixed line, or null')
+    if item['ice'] is not None and item['ice'] not in ICE_LINES:
+        raise Refused(f'{named} has ice {example(item["ice"])}: it is null or one of {", ".join(ICE_LINES)}')
+    if not isinstance(item['why'], str) or not item['why'].strip():
+        raise Refused(f'{named} has why {example(item["why"])}: what a hit means, in words')
+    for key in ('hits', 'misses'):
+        texts = item[key]
+        if not isinstance(texts, list) or not texts or not all(isinstance(t, str) and t for t in texts):
+            raise Refused(f'{named} has {key} {example(texts)}: a list of 1 or more texts')
+    match = item['match']
+    kinds = [key for key in MATCHES if isinstance(match, dict) and key in match]
+    extra = (
+        set(match) - set(MATCHES) - ({'in_emoji'} if kinds == ['chars'] else set())
+        if isinstance(match, dict)
+        else set()
+    )
+    if len(kinds) != 1 or extra:
+        raise Refused(f'{named} has match {example(match)}: one of {", ".join(MATCHES)} (chars may add in_emoji)')
+    kind, value = kinds[0], match[kinds[0]]
+    if kind == 'regex':
+        patterns = [value] if isinstance(value, str) else value
+        if not isinstance(patterns, list) or not patterns or not all(isinstance(p, str) for p in patterns):
+            raise Refused(f'{named} has regex {example(value)}: a pattern, or a list of them')
+        compiled = []
+        for place, pattern in enumerate(patterns, 1):
+            try:
+                compiled.append(re.compile(pattern))
+            except re.error as error:
+                raise Refused(f'{named}: pattern {place} is not a regex Python takes: {error}') from None
+        find = regex_finder(compiled)
+    elif kind == 'chars':
+        banned = hex_letters(value, f'{named}: chars')
+        joiners = hex_letters(match['in_emoji'], f'{named}: in_emoji') if 'in_emoji' in match else set()
+        if not joiners <= banned or not joiners <= set(JOINERS):
+            raise Refused(f'{named}: in_emoji takes 200D and FE0F alone, each also in chars')
+        find = odd_letters(frozenset(banned), frozenset(joiners))
+    else:
+        if value not in languages:
+            raise Refused(f'{named} has not_language {example(value)}: the file has {", ".join(languages)}')
+        find = other_language(languages, value)
+    rule = Rule(item['id'], direction, action, item['reply'], item['ice'], item['why'], find, (), ())
+    for place, text in enumerate(item['hits'], 1):
+        if find(text) is None:
+            raise Refused(f'{named}: hit {place}, {example(text)}, is missed')
+    for place, text in enumerate(item['misses'], 1):
+        if find(text) is not None:
+            raise Refused(
+                f'{named}: miss {place}, {example(text)}, is hit: {caught((rule,), direction, text)[0].said()}'
+            )
+    return rule._replace(hits=tuple(item['hits']), misses=tuple(item['misses']))
+
+
+def load_rules(path=PREHARNESS):
+    """the pre-harness's rules, each run on its own examples; Refused naming the file, the rule and what is wrong,
+    as the bot does not start without them"""
+    path = Path(path)
+    stops = f'{path}: '
+    try:
+        found = json.loads(path.read_text(encoding='utf-8'))
+    except OSError as error:
+        raise Refused(f'{path} cannot be read ({error.strerror or error})') from None
+    except ValueError as error:  # UnicodeDecodeError is one
+        raise Refused(f'{path} is not JSON: {error}') from None
+    if not isinstance(found, dict) or set(found) != {'languages', 'rules'}:
+        raise Refused(f'{path} holds {shown(found)}: an object of "languages" and "rules"')
+    languages, items = found['languages'], found['rules']
+    if not isinstance(languages, dict) or not all(
+        isinstance(words, list) and words and all(isinstance(w, str) and w == w.lower() for w in words)
+        for words in languages.values()
+    ):
+        raise Refused(f'{stops}languages is not an object of lists of lowercase words, one for each language')
+    if not isinstance(items, list) or not items:
+        raise Refused(f'{stops}rules is {shown(items)}: a list of 1 or more rules')
+    rules, ids = [], set()
+    for place, item in enumerate(items, 1):
+        try:
+            rule = rule_of(item, languages, f'rule {place}')
+        except Refused as error:
+            raise Refused(f'{stops}{error}') from None
+        if rule.id in ids:
+            raise Refused(f'{stops}rule {place}: id {rule.id} again: each rule has its own')
+        ids.add(rule.id)
+        rules.append(rule)
+    return tuple(rules)
+
+
+def caught(rules, direction, text):
+    """the rules of a direction the text hits, in the file's order: [Hit]"""
+    hits = []
+    for rule in rules:
+        if rule.direction != direction:
+            continue
+        found = rule.find(text)
+        if found is not None:
+            at, detail = found
+            if at is None:
+                hits.append(Hit(rule, None, None, detail))
+            else:
+                line = text.count('\n', 0, at) + 1
+                hits.append(Hit(rule, line, at - text.rfind('\n', 0, at), detail))
+    return hits
 
 
 def by_id(ids):
@@ -1226,8 +1501,11 @@ def ran(until, shown_as):
 class Wimsy:
     """the tools: Discord with the settings' identity, channels, people and owner"""
 
-    def __init__(self, settings, discord, clock, hub=None, files=None, drawings=None, state=None):
+    def __init__(self, settings, discord, clock, hub=None, files=None, drawings=None, state=None, rules=None):
         self.settings, self.discord, self.clock = settings, discord, clock
+        # the pre-harness, for a bot with a command (its people's standing lives in its state): main loads it first,
+        # so a file it cannot take stops the start
+        self.rules = rules if rules is not None else load_rules() if settings.identity.command else ()
         self.title = settings.identity.title
         self.hub = hub or Hub()
         self.files = Path(files) if files else saves_folder(settings.identity.server)  # where discord_attachments saves
@@ -3349,9 +3627,13 @@ def main(argv=None, identity=AOGO):
         settings = read_settings(path, identity)
     except Refused as error:
         sys.exit(f'{identity.server}: {error}')
+    try:
+        rules = load_rules() if identity.command else ()
+    except Refused as error:
+        sys.exit(f'{identity.server}: {error}; {identity.title} does not start until it is mended')
     clock, stop = Clock(), threading.Event()
     discord = Discord(settings.token, clock, identity=identity)
-    tools = Wimsy(settings, discord, clock)
+    tools = Wimsy(settings, discord, clock, rules=rules)
     write = LineWriter(sys.stdout.buffer)
     relay = relay_for(identity, os.getppid())  # the client that started it is its parent
 
