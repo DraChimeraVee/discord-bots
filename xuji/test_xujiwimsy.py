@@ -175,7 +175,8 @@ class Handshake(WithXuji):
         self.assertNotIn('aogo', text.lower().replace(f':{aw.WIMSY}:', ''))  # the owner's emoji alone is named for Aogo
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
-        aogos = ('discord_emoji_upload', 'discord_allowed')  # Aogo's drawings' and its command's, which Xuji has not
+        # Aogo's drawings' and its command's (the allows, the ice, which its state holds), which Xuji has not
+        aogos = ('discord_emoji_upload', 'discord_allowed', 'discord_freeze')
         as_aogo = json.loads(text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY'))
         self.assertEqual(
             [tool for tool in as_aogo if tool['name'] not in reacting],
