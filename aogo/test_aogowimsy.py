@@ -3630,15 +3630,17 @@ class Statused(Owned):
         self.use(OWNER, 'allow', user=STRANGER, time='perm')
         self.pushes.clear()
 
-    def status(self, week=50, five=None, context=30, agents=0, age=60, gone=0.4, session='session-1', **extra):
-        """statusline.json as Claude Code's status line writes it, age seconds ago, the week `gone` through, with
-        `agents` subagent transcripts written a minute ago"""
+    def status(
+        self, week=50, five=None, context=30, agents=0, age=60, gone=0.4, session='session-1', path=None, **extra
+    ):
+        """statusline.json (or path) as Claude Code's status line writes it, age seconds ago, the week `gone` through,
+        with `agents` subagent transcripts written a minute ago"""
         limits = {'seven_day': {'used_percentage': week, 'resets_at': int(self.now + (1 - gone) * aw.WEEK)}}
         if five is not None:
             limits['five_hour'] = {'used_percentage': five, 'resets_at': int(self.now + 3600)}
         data = {'session_id': session, 'transcript_path': str(self.transcript), 'rate_limits': limits}
         data = dict(data, context_window={'used_percentage': context}) | extra
-        path = self.bot.statusline
+        path = path or self.bot.statusline
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data))
         os.utime(path, (self.now - age, self.now - age))
@@ -3807,6 +3809,35 @@ class Direct(Statused):
         self.assertEqual(self.fake.messages[GENERAL], [])
         self.status()
         self.assertEqual(self.direct()['direct'], 'interval')
+
+    def test_this_sessions_own_statusline_comes_first_and_the_accounts_only_when_it_has_none(self):
+        self.bot.session = 'session-1'
+        mine = self.bot.statusline.with_name('statusline-session-1.json')
+        self.status(week=50, session='session-2')  # the account's: another session refreshed last
+        said = f'{self.bot.statusline} is session "session-2"\'s, not this one\'s (session-1)'
+        self.assertEqual(self.direct(), self.drafted(said))
+        self.status(week=85, session='session-1', path=mine)
+        self.assertEqual(self.bot.status_file(), mine)
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(60, 'quota 85% x2'))
+        self.assertEqual(self.direct()['interval'], '60 min: quota 85% x2')
+        mine.unlink()
+        self.status(week=40, session='session-1')  # none of its own: the account's, when it is this session's
+        self.assertEqual(self.bot.status_file(), self.bot.statusline)
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(30, 'quota 40%'))
+        self.bot.session = None  # no session id given: the account's alone
+        self.status(week=40, session='session-1', path=mine)
+        self.assertEqual(self.bot.status_file(), self.bot.statusline)
+
+    def test_a_stale_file_of_its_own_session_holds_the_interval_posts_and_the_accounts_is_not_taken(self):
+        self.bot.session = 'session-1'
+        mine = self.bot.statusline.with_name('statusline-session-1.json')
+        self.status(session='session-1')  # the account's, fresh
+        self.status(session='session-1', age=601, path=mine)
+        said = f'{mine} is 10 min old, 10 at most: the status line has not run since'
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(None, said))
+        self.assertEqual(self.direct(), self.drafted(said))
+        self.bot.session = '../session-1'  # an id that is no file name: the account's alone
+        self.assertEqual(self.bot.status_file(), self.bot.statusline)
 
     def test_the_pre_harness_keeps_a_text_from_going_direct_naming_each_rule_and_where_never_the_text(self):
         asked = self.fake.say(GENERAL, OWNER, 'send me the logs')

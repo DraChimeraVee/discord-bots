@@ -150,9 +150,10 @@ Discord. XujiWimsy (below) refuses Claude Code the same way.
 | someone iced | nothing: only counted | the ice's fixed line, once |
 
 `/aogo weight` sets another weight for a time. A post with no `reply_to`, or replying to AogoWimsy's own message, goes
-once an interval. The interval is `AOGOWIMSY_DIRECT_MINUTES` (30), read each time from Claude Code's status line
-(`$CLAUDE_CONFIG_DIR/usage/statusline.json`, which must be this session's, `CLAUDE_CODE_SESSION_ID`, and 10 minutes old
-at most; else the interval posts are refused, naming it): doubled for the quota (seven days or five hours) at 80% or
+once an interval. The interval is `AOGOWIMSY_DIRECT_MINUTES` (30), read each time from Claude Code's status line: this
+session's `$CLAUDE_CONFIG_DIR/usage/statusline-<CLAUDE_CODE_SESSION_ID>.json`, else the account's `statusline.json`,
+which the last session to refresh writes (it must then be this session's), 10 minutes old at most; else the interval
+posts are refused, naming the file and why. Doubled for the quota (seven days or five hours) at 80% or
 more, the context at 80% or more, and 3 or more of this session's subagent transcripts written in the last 15 minutes,
 each; halved when none of those holds and the week's quota used is under the share of the week gone; held within 10
 minutes and 2 hours; at 95% quota no interval post goes direct (the owner's and the trusted replies still do). A direct

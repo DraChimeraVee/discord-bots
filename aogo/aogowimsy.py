@@ -84,9 +84,10 @@ Discord's REST API v10 (urllib) reads and posts; its gateway (a WebSocket of its
 in the channels <PREFIX>_CHANNELS lists and their threads, or in every one Discord lets it see when it lists none,
 and in the owner's DMs with it. A session's text gets out through the owner's check mark, or, for AogoWimsy with
 <PREFIX>_DIRECT 1, as a direct post its rules let: a reply to the owner's message or a trusted person's, REPLIES each
-(in DMs, the owner's alone), and the rest once an interval (pace), from Claude Code's statusline.json (this
-session's, STATUS_FRESH at most): <PREFIX>_DIRECT_MINUTES doubled for the quota, the context and the agents high
-each, halved with quota to spare, within DIRECT_RANGE, none at QUOTA_STOP. A direct text passes the pre-harness's
+(in DMs, the owner's alone), and the rest once an interval (pace), from Claude Code's status line (status_file:
+this session's statusline-<id>.json, else the account's statusline.json; STATUS_FRESH at most):
+<PREFIX>_DIRECT_MINUTES doubled for the quota, the context and the agents high each, halved with quota to spare,
+within DIRECT_RANGE, none at QUOTA_STOP. A direct text passes the pre-harness's
 outbound rules and the bot's own token first; a refusal is an error naming the rule, and the session sends a draft.
 XujiWimsy's client's quota is not Claude Code's: it posts drafts alone. A reaction or a quick reply carries no text,
 so it goes at once, and only one of its identity's few emojis; the greeting, an answer to /aogo and a rule's or the
@@ -2174,11 +2175,21 @@ class Wimsy:
             self.discord('PUT', f'/channels/{dm}/messages/{draft}/reactions/{urllib.parse.quote(emoji)}/@me')
         return self.verdict(draft, wait, cancelled, progress)
 
+    def status_file(self):
+        """this session's statusline-<session id>.json beside the account's statusline.json, which the status line
+        writes for each session; the account's, which the last session to refresh writes, when there is none (or the
+        server knows no session id)"""
+        if self.session and re.fullmatch(r'[A-Za-z0-9_-]+', self.session):
+            mine = self.statusline.with_name(f'statusline-{self.session}.json')
+            if mine.exists():
+                return mine
+        return self.statusline
+
     def pace(self, now):
         """the interval in force for the direct posts that need one, from Claude Code's statusline.json: its base,
         doubled for the quota, the context and this session's agents each, halved with the quota under the week's
         share gone, within DIRECT_RANGE; none at QUOTA_STOP, nor with a file missing, stale or another session's"""
-        path, base = self.statusline, self.settings.direct_minutes
+        path, base = self.status_file(), self.settings.direct_minutes
         try:
             found = path.stat()
             data = json.loads(path.read_text(encoding='utf-8'))
