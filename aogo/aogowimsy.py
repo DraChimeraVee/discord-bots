@@ -118,6 +118,7 @@ class Identity(NamedTuple):
     command: str | None = None  # its slash command's name (COMMANDS), registered in each server it is in; None: none
     drawn: tuple = ()  # its custom emojis, one for each of MEANINGS (EMOJI_FOLDER/<name>.png); (): unicode alone
     program: str = 'aogo/aogowimsy.py'  # its program, from the repository's root: the monitor runs it --listen
+    direct: bool = False  # True: it may post at once, within its rules, the quota and context of Claude Code's
 
     def key(self, name):
         return f'{self.prefix}_{name}'
@@ -134,8 +135,17 @@ class Identity(NamedTuple):
         return tuple(self.key(name) for name in GREET_LIMITS) if self.greeting else ()
 
     @property
+    def direct_keys(self):
+        """the keys of the direct posts, for a bot that makes them"""
+        return (self.key('DIRECT'), self.key('DIRECT_MINUTES')) if self.direct else ()
+
+    @property
     def keys(self):
-        return (*(self.key(name) for name in ('TOKEN', 'OWNER', 'USERS', 'CHANNELS')), *self.greet_keys)
+        return (
+            *(self.key(name) for name in ('TOKEN', 'OWNER', 'USERS', 'CHANNELS')),
+            *self.greet_keys,
+            *self.direct_keys,
+        )
 
     @property
     def says(self):
@@ -169,6 +179,18 @@ GREETING = (
 )
 GREET_HOURS = 24  # hours before one person is greeted again
 GREET_PER_HOUR = 10  # greetings in an hour at most, everyone's together; 0 greets no one
+# The direct posts (DraVee, 2026-11-05: "uma permissao pra vc poder passar uma mensagem direto sem minha aprovacao
+# se vc achar que ta ok ... tipo 1 a cada 30m dependendo do quanto tiver a cota, contexto e numero de coisas fazendo";
+# "logicamente deixar livre pra quando for eu perguntando"): replies to the owner and to those he trusts go at once, up
+# to REPLIES a message; the others once an interval, its base DIRECT_MINUTES, slower with the quota, the context or the
+# agents high, faster with quota to spare, within DIRECT_RANGE minutes; none at QUOTA_STOP percent
+DIRECT_MINUTES = 30
+DIRECT_RANGE = (10, 120)
+REPLIES = 3
+QUOTA_SLOW, QUOTA_STOP, CONTEXT_SLOW = 80, 95, 80  # percents
+AGENTS_SLOW, AGENTS_FOR = 3, 15 * 60  # subagent transcripts written in the last AGENTS_FOR seconds
+STATUS_FRESH = 10 * 60  # seconds statusline.json is taken for after its last write
+WEEK = 7 * 24 * 3600  # seconds of the seven_day window
 GREET_LIMITS = {  # each limit's key (after the prefix): its default and the whole numbers it takes
     'GREET_HOURS': (GREET_HOURS, 1, 720),
     'GREET_PER_HOUR': (GREET_PER_HOUR, 0, 100),
@@ -222,6 +244,7 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
     'heard': 'no message of a trusted or allowed person reaches the session',
     'flags': 'the one-time notes to the owner wait',
     'admins': 'no admin role is pinged',
+    'direct': 'no post goes direct',
 }
 YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
 # The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
@@ -246,6 +269,7 @@ AOGO = Identity(
     greeting=GREETING,
     command='aogo',
     drawn=DRAWN,
+    direct=True,
 )
 XUJI = Identity(
     'xujiwimsy',
@@ -372,6 +396,8 @@ class Settings(NamedTuple):
     identity: Identity = AOGO
     greet_hours: int = GREET_HOURS
     greet_per_hour: int = GREET_PER_HOUR
+    direct: bool = True  # False: every post is a draft
+    direct_minutes: int = DIRECT_MINUTES  # the interval's base
 
 
 class Standing(NamedTuple):
@@ -395,6 +421,28 @@ class Intake(NamedTuple):
     hit: object  # the pre-harness's rejecting Hit, or None
     until: float | None  # when the ice its rule made ends, or None
     due: bool  # whether the rule's line goes: once a person each LINE_EVERY, or with the ice it made
+
+
+class Pace(NamedTuple):
+    """the interval in force for the direct posts that need one"""
+
+    minutes: int | None  # None: none of them goes direct now
+    why: str  # its factors in words, or why none goes
+
+
+class Way(NamedTuple):
+    """how the session's text may go"""
+
+    rule: str | None  # owner, trusted or interval: direct; None: a draft only
+    why: str  # why a draft only; for the interval, its factors
+    left: int  # direct replies left to the message, for owner and trusted
+    next: float | None  # when the next interval post may go
+    minutes: int | None  # the interval in force
+
+
+def hour_minute(when):
+    """a time as HH:MM in UTC"""
+    return datetime.datetime.fromtimestamp(when, datetime.UTC).strftime('%H:%M')
 
 
 def shown(value):
@@ -473,7 +521,15 @@ def read_settings(path, identity=AOGO):
     for name, (default, low, high) in GREET_LIMITS.items():
         key = identity.key(name)
         limits.append(whole_text(path, key, values[key], low, high) if key in values else default)
-    return Settings(token, owner, users, channels, identity, *limits)
+    direct, minutes = True, DIRECT_MINUTES
+    if identity.direct:
+        key, minutes_key = identity.direct_keys
+        if key in values and values[key] not in ('0', '1'):
+            raise Refused(f'{path}: {key} is {shown(values[key])}, not 0 (every post a draft) or 1 (direct posts too)')
+        direct = values.get(key, '1') == '1'
+        if minutes_key in values:
+            minutes = whole_text(path, minutes_key, values[minutes_key], *DIRECT_RANGE)
+    return Settings(token, owner, users, channels, identity, *limits, direct, minutes)
 
 
 def whole_text(path, key, value, low, high):
@@ -520,6 +576,10 @@ class Hit(NamedTuple):
     def said(self):
         where = f' at line {self.line}, letter {self.letter}' if self.line else ''
         return f'{self.rule.id} ({self.rule.why}{": " + self.detail if self.detail else ""}){where}'
+
+
+# the bot's own token, which no text of the session's carries direct, whatever its shape: its value is the env file's
+TOKEN_RULE = Rule('bot-token', 'out', 'draft', None, None, "the bot's own token", None, (), ())
 
 
 def example(text):
@@ -1164,6 +1224,19 @@ SHAPES = {
             and isinstance(item[3], str)
         ),
     ),
+    'direct': (
+        '[time, its id, the message it replies to or null, owner trusted or interval, the post or null]',
+        lambda item: (
+            isinstance(item, list)
+            and len(item) == 5
+            and stamp(item[0])
+            and isinstance(item[1], str)
+            and re.fullmatch(r'[0-9a-f]{32}', item[1]) is not None
+            and (item[2] is None or an_id(item[2]))
+            and item[3] in ('owner', 'trusted', 'interval')
+            and (item[4] is None or an_id(item[4]))
+        ),
+    ),
     'admins': (
         '[server id, role id]',
         lambda item: isinstance(item, list) and len(item) == 2 and all(map(an_id, item)),
@@ -1654,11 +1727,19 @@ def ran(until, shown_as):
 class Wimsy:
     """the tools: Discord with the settings' identity, channels, people and owner"""
 
-    def __init__(self, settings, discord, clock, hub=None, files=None, drawings=None, state=None, rules=None):
+    def __init__(
+        self, settings, discord, clock, hub=None, files=None, drawings=None, state=None, rules=None, environ=None
+    ):
         self.settings, self.discord, self.clock = settings, discord, clock
         # the pre-harness, for a bot with a command (its people's standing lives in its state): main loads it first,
         # so a file it cannot take stops the start
         self.rules = rules if rules is not None else load_rules() if settings.identity.command else ()
+        # Claude Code's status line writes statusline.json in its config folder (the quota, the context, this
+        # session's transcript), and gives the session's id to the servers it starts
+        environ = os.environ if environ is None else environ
+        config = environ.get('CLAUDE_CONFIG_DIR') or str(Path.home() / '.claude')
+        self.statusline = Path(config) / 'usage' / 'statusline.json'
+        self.session = environ.get('CLAUDE_CODE_SESSION_ID') or None
         self.title = settings.identity.title
         self.hub = hub or Hub()
         self.files = Path(files) if files else saves_folder(settings.identity.server)  # where discord_attachments saves
@@ -1991,7 +2072,7 @@ class Wimsy:
         return tools[name](args, cancelled, progress)
 
     def post(self, args, cancelled, progress):
-        take(args, 'discord_post', ('channel', 'text'), ('reply_to', 'wait', 'files'))
+        take(args, 'discord_post', ('channel', 'text'), ('reply_to', 'wait', 'files', 'direct'))
         channel = snowflake(args['channel'], 'channel')
         text = args['text']
         if not isinstance(text, str):
@@ -2001,6 +2082,11 @@ class Wimsy:
         if len(text) > LIMIT:
             raise Refused(f'text has {len(text)} letters: a Discord message holds {LIMIT} at most')
         reply_to = None if args.get('reply_to') is None else snowflake(args['reply_to'], 'reply_to')
+        direct = args.get('direct')
+        if direct is not None and not isinstance(direct, bool):
+            raise Refused(f'direct is {shown(direct)}, not true or false')
+        if direct:
+            return self.post_direct(channel, text, reply_to, args)
         wait = whole(args.get('wait'), 'wait', 300, 0, MOST_WAIT)
         files = images(args.get('files'), self.title)
         where = self.where(channel, reading=False)
@@ -2015,6 +2101,192 @@ class Wimsy:
         for emoji in (YES, NO):
             self.discord('PUT', f'/channels/{dm}/messages/{draft}/reactions/{urllib.parse.quote(emoji)}/@me')
         return self.verdict(draft, wait, cancelled, progress)
+
+    def pace(self, now):
+        """the interval in force for the direct posts that need one, from Claude Code's statusline.json: its base,
+        doubled for the quota, the context and this session's agents each, halved with the quota under the week's
+        share gone, within DIRECT_RANGE; none at QUOTA_STOP, nor with a file missing, stale or another session's"""
+        path, base = self.statusline, self.settings.direct_minutes
+        try:
+            found = path.stat()
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return Pace(None, f"{path} is missing: Claude Code's status line writes it")
+        except OSError as error:
+            return Pace(None, f'{path} cannot be read ({error.strerror or error})')
+        except ValueError as error:
+            return Pace(None, f'{path} is not JSON ({error})')
+        age = now - found.st_mtime
+        if age > STATUS_FRESH:
+            return Pace(
+                None,
+                f'{path} is {int(age // 60)} min old, {STATUS_FRESH // 60} at most: the status line has not run since',
+            )
+        data = data if isinstance(data, dict) else {}
+        if self.session and data.get('session_id') != self.session:
+            return Pace(None, f"{path} is session {shown(data.get('session_id'))}'s, not this one's ({self.session})")
+        limits = data.get('rate_limits') if isinstance(data.get('rate_limits'), dict) else {}
+        week = limits.get('seven_day') if isinstance(limits.get('seven_day'), dict) else {}
+        five = (
+            (limits.get('five_hour') or {}).get('used_percentage')
+            if isinstance(limits.get('five_hour'), dict)
+            else None
+        )
+        context = data.get('context_window') if isinstance(data.get('context_window'), dict) else {}
+        values = {
+            'rate_limits.seven_day.used_percentage': week.get('used_percentage'),
+            'rate_limits.seven_day.resets_at': week.get('resets_at'),
+            'context_window.used_percentage': context.get('used_percentage'),
+        }
+        if five is not None:
+            values['rate_limits.five_hour.used_percentage'] = five
+        for name, value in values.items():
+            if not stamp(value):
+                return Pace(None, f'{path} has {name} {shown(value)}, not a number: the interval cannot be weighed')
+        transcript = data.get('transcript_path')
+        if not isinstance(transcript, str) or not transcript:
+            return Pace(
+                None, f"{path} has transcript_path {shown(transcript)}: this session's agents cannot be counted"
+            )
+        agents = 0
+        for each in (Path(transcript).with_suffix('') / 'subagents').glob('agent-*.jsonl'):
+            with contextlib.suppress(OSError):  # one gone since the folder was listed
+                agents += each.stat().st_mtime > now - AGENTS_FOR
+        used, context = week['used_percentage'], context['used_percentage']
+        quota, which = (five, 'five_hour') if five is not None and five > used else (used, 'seven_day')
+        if quota >= QUOTA_STOP:
+            return Pace(None, f'quota {quota:g}% ({which}): at {QUOTA_STOP}% or more no interval post goes direct')
+        factor, said = 1.0, []
+        for high, words in (
+            (quota >= QUOTA_SLOW, f'quota {quota:g}% x2'),
+            (context >= CONTEXT_SLOW, f'context {context:g}% x2'),
+            (agents >= AGENTS_SLOW, f'{agents} agents x2'),
+        ):
+            if high:
+                factor *= 2
+                said.append(words)
+        gone = min(max((now - (week['resets_at'] - WEEK)) / WEEK, 0.0), 1.0) * 100
+        if not said and used < gone:
+            factor = 0.5
+            said.append(f'quota {used:g}% with {gone:.0f}% of the week gone x0.5')
+        raw = base * factor
+        minutes = int(min(max(raw, DIRECT_RANGE[0]), DIRECT_RANGE[1]))
+        why = ', '.join(said) or f'quota {quota:g}%'
+        if minutes != raw:
+            why += f': {raw:g} min, held within {DIRECT_RANGE[0]} to {DIRECT_RANGE[1]}'
+        return Pace(minutes, why)
+
+    def way(self, where, message, now, pace=None, records=None):
+        """how the session's text may go to a channel (where, as Discord gives it), replying to message (None for
+        none): direct for the owner's message and a trusted person's, REPLIES at most each (in DMs, the owner's alone);
+        once an interval for an allowed person's, its own or none; a draft only for anything else. records: the direct
+        posts read under the lock, for a post"""
+        settings, identity = self.settings, self.settings.identity
+
+        def draft(why):
+            return Way(None, why, 0, None, None)
+
+        if not identity.direct:
+            return draft(
+                f"{self.title} posts drafts only: the quota and context its direct posts would follow are Claude Code's"
+            )
+        if not settings.direct:
+            return draft(f'{identity.key("DIRECT")} is 0: every post is a draft')
+        if where.get('type') == DM and where['id'] != self.dm():
+            return draft(f"in DMs a direct post goes to the owner's alone ({self.dm()})")
+        records = self.store.cached('direct') if records is None else records
+        rule = 'interval'
+        if message is not None:
+            author = message['author']['id']
+            hits = [] if author == settings.owner else caught(self.rules, 'in', message.get('content') or '')
+            held = next((hit for hit in hits if hit.rule.action in ('draft', 'reject')), None)
+            if held:
+                return draft(f'message {message["id"]} carries {held.rule.id} ({held.rule.why})')
+            standing = self.standing(author, now)
+            if standing.level in ('owner', 'trusted'):
+                rule = standing.level
+            elif standing.level == 'allowed' and standing.ice:
+                return draft(f'its author is iced until {utc(standing.ice["until"])} ({standing.ice["kind"]})')
+            elif standing.level == 'stranger' and author != self.me():
+                return draft(
+                    f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+                )
+        if rule != 'interval':
+            left = REPLIES - sum(1 for item in records if item[2] == message['id'])
+            if left <= 0:
+                return draft(
+                    f'{REPLIES} direct replies to message {message["id"]} went already, the most for one message'
+                )
+            return Way(rule, '', left, None, None)
+        pace = self.pace(now) if pace is None else pace
+        if pace.minutes is None:
+            return draft(pace.why)
+        last = max((item[0] for item in records if item[3] == 'interval'), default=None)
+        return Way('interval', pace.why, 0, now if last is None else max(now, last + pace.minutes * 60), pace.minutes)
+
+    def leaks(self, text):
+        """what of a text the outbound rules and the bot's own token keep from going direct: [Hit]"""
+        hits = caught(self.rules, 'out', text)
+        token = self.settings.token
+        if token and token in text:
+            at = text.index(token)
+            hits.append(Hit(TOKEN_RULE, text.count('\n', 0, at) + 1, at - text.rfind('\n', 0, at), None))
+        return hits
+
+    def post_direct(self, channel, text, reply_to, args):
+        """a post that goes at once, with no draft, when the rules let it; else Refused naming the rule and, for the
+        interval, when the next may go: the session sends the draft"""
+        settings, identity = self.settings, self.settings.identity
+        instead = 'post it without direct, as a draft the owner sees'
+        if args.get('files') is not None:
+            raise Refused(f'direct is true, and a direct post carries no files: {instead}')
+        if args.get('wait') is not None:
+            raise Refused("wait is for the owner's answer to a draft, and a direct post waits for none: take it out")
+        if not identity.direct or not settings.direct:
+            raise Refused(f'direct is true, and {self.way({}, None, 0).why}: {instead}')
+        hits = self.leaks(text)
+        if hits:
+            raise Refused(
+                f'the pre-harness keeps this text from going direct: {"; ".join(hit.said() for hit in hits)}: {instead}'
+            )
+        where = self.where(channel, reading=False)
+        message = self.discord('GET', f'/channels/{channel}/messages/{reply_to}') if reply_to else None
+        now, mark = self.store.now(), uuid.uuid4().hex
+        way = self.way(where, message, now)
+        pace = Pace(way.minutes, way.why) if way.rule == 'interval' else None
+        with self.store.locked():
+            records = [item for item in self.store.load('direct') if item[0] > now - HEARD_FOR]
+            way = self.way(where, message, now, pace, records) if way.rule else way
+            if way.rule is None:
+                raise Refused(f'this text goes as a draft, not direct: {way.why}; {instead}')
+            if way.rule == 'interval' and way.next > now:
+                last = way.next - way.minutes * 60
+                raise Refused(
+                    f'this text goes as a draft, not direct: the last interval post went at {hour_minute(last)} UTC and '
+                    f'the interval is {way.minutes} min ({way.why}), so the next goes direct from '
+                    f'{hour_minute(way.next)} UTC ({utc(way.next)}); {instead}, or wait'
+                )
+            self.store.save('direct', records + [[now, mark, reply_to, way.rule, None]])
+        body = {'content': text, 'allowed_mentions': {'parse': [], 'replied_user': False}}
+        if reply_to:
+            body['message_reference'] = {'message_id': reply_to, 'channel_id': channel, 'fail_if_not_exists': True}
+        try:
+            posted = self.discord('POST', f'/channels/{channel}/messages', body)['id']
+        except DiscordError:
+            with self.store.locked():  # its turn not taken: nothing went
+                self.store.save('direct', [item for item in self.store.load('direct') if item[1] != mark])
+            raise
+        with self.store.locked():
+            items = self.store.load('direct')
+            self.store.save('direct', [item[:4] + [posted] if item[1] == mark else item for item in items])
+        log(f'discord_post: direct ({way.rule}), message {posted} in channel {channel}')
+        got = {'status': 'sent', 'direct': way.rule, 'link': link(where.get('guild_id'), channel, posted)}
+        got.update(message=posted, channel=channel)
+        if way.rule == 'interval':
+            got.update(next=utc(now + way.minutes * 60), interval=f'{way.minutes} min: {way.why}')
+        else:
+            got['left'] = way.left - 1
+        return got
 
     def post_status(self, args, cancelled, progress):
         take(args, 'discord_post_status', ('draft',), ('wait',))
@@ -3560,6 +3832,23 @@ def reacting_schema(identity, emoji):
     }
 
 
+def direct_text(identity):
+    """what discord_post says of its direct posts, for a bot that makes them"""
+    return (
+        " With direct true it posts at once, with no draft, pinging no one, when the server's rules let it: a reply "
+        f"to the owner's message or a trusted person's, {REPLIES} at most each (in DMs, the owner's alone); a reply to "
+        "an allowed person's, to its own or none, once an interval: "
+        f'{identity.key("DIRECT_MINUTES")} ({DIRECT_MINUTES} by default), doubled for the quota at {QUOTA_SLOW}%, the '
+        f'context at {CONTEXT_SLOW}% and {AGENTS_SLOW} agents working each, halved with quota to spare, '
+        f"{DIRECT_RANGE[0]} to {DIRECT_RANGE[1]} min, none at {QUOTA_STOP}% quota; never to a stranger's message. The "
+        'text passes the pre-harness first (tokens, keys, paths of this machine, private addresses, e-mails, title '
+        'IDs, the env file). Anything else is an error naming the rule, and for the interval when the next goes: '
+        'send the draft yourself. No files. Returns JSON {"status": "sent", "direct": "owner", "trusted" or '
+        '"interval", "link", "message", "channel", and "left" (replies left to that message) or "next" and '
+        '"interval"}.'
+    )
+
+
 def where_text(identity):
     """the channels a tool's description says it works in"""
     return (
@@ -3811,6 +4100,13 @@ def tool_list(identity):
             'additionalProperties': False,
         },
     }
+    if identity.direct:
+        tools[0]['description'] += direct_text(identity)
+        tools[0]['inputSchema']['properties']['direct'] = {
+            'type': 'boolean',
+            'default': False,
+            'description': "true: post at once, with no draft, when the server's rules let it; else an error naming why",
+        }
     owned = [allowed, freeze] if identity.command else []
     return tools + ([upload] if identity.drawn else []) + owned
 

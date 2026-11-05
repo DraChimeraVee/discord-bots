@@ -32,6 +32,10 @@ os.environ['no_proxy'] = os.environ['NO_PROXY'] = '127.0.0.1'  # the fakes, neve
 # the greetings' state folder of every Wimsy made here, the programs started too: never the user's ~/.local/state
 STATE_HOME = tempfile.TemporaryDirectory(prefix='aogowimsy-tests-')
 os.environ['XDG_STATE_HOME'] = STATE_HOME.name
+# Claude Code's config folder, where the direct posts read statusline.json: never the user's, and no session's id
+CLAUDE_HOME = tempfile.TemporaryDirectory(prefix='aogowimsy-claude-')
+os.environ['CLAUDE_CONFIG_DIR'] = CLAUDE_HOME.name
+os.environ.pop('CLAUDE_CODE_SESSION_ID', None)
 
 TOKEN = 'MTAwMDAw.fake-token_for.tests'
 PNG = b'\x89PNG\r\n\x1a\n a fake image'
@@ -550,6 +554,25 @@ class EnvFile(unittest.TestCase):
         example = (HERE / 'aogowimsy.env.example').read_text()  # it says the defaults the code has
         self.assertIn(f'\n# AOGOWIMSY_GREET_HOURS={aw.GREET_HOURS}\n', example)
         self.assertIn(f'\n# AOGOWIMSY_GREET_PER_HOUR={aw.GREET_PER_HOUR}\n', example)
+
+    def test_the_direct_keys_are_read_checked_and_named(self):
+        settings = aw.read_settings(self.env(GOOD_ENV))
+        self.assertEqual((settings.direct, settings.direct_minutes), (True, aw.DIRECT_MINUTES))
+        self.assertEqual(aw.DIRECT_MINUTES, 30)
+        settings = aw.read_settings(self.env(GOOD_ENV + 'AOGOWIMSY_DIRECT=0\nAOGOWIMSY_DIRECT_MINUTES = 45\n'))
+        self.assertEqual((settings.direct, settings.direct_minutes), (False, 45))
+        minutes = 'not a whole number from 10 to 120'
+        for line, said in (
+            ('AOGOWIMSY_DIRECT=2', 'AOGOWIMSY_DIRECT is "2", not 0 (every post a draft) or 1 (direct posts too)'),
+            ('AOGOWIMSY_DIRECT=', 'AOGOWIMSY_DIRECT is "", not 0 (every post a draft) or 1'),
+            ('AOGOWIMSY_DIRECT_MINUTES=9', f'AOGOWIMSY_DIRECT_MINUTES is "9", {minutes}'),
+            ('AOGOWIMSY_DIRECT_MINUTES=121', f'AOGOWIMSY_DIRECT_MINUTES is "121", {minutes}'),
+            ('AOGOWIMSY_DIRECT_MINUTES=half', f'AOGOWIMSY_DIRECT_MINUTES is "half", {minutes}'),
+        ):
+            self.assertIn(said, self.refused(GOOD_ENV + line + '\n'))
+        example = (HERE / 'aogowimsy.env.example').read_text()  # it says the defaults the code has
+        self.assertIn('\n# AOGOWIMSY_DIRECT=1\n', example)
+        self.assertIn(f'\n# AOGOWIMSY_DIRECT_MINUTES={aw.DIRECT_MINUTES}\n', example)
 
     def test_a_missing_file_says_so(self):
         with self.assertRaisesRegex(aw.Refused, 'nowhere.env cannot be read'):
@@ -3546,6 +3569,281 @@ class Inbound(Owned):
         self.reacted(GENERAL, clean, WIMSY, OWNER)
         self.assertEqual(self.pushes[-1][1]['kind'], 'approved')
         self.assertTrue(self.pushes[-1][1]['caution'].startswith('owner-call: '))
+
+
+class Direct(Owned):
+    """discord_post with direct: at once and with no draft where the rules let it, else an error naming why"""
+
+    INSTEAD = 'post it without direct, as a draft the owner sees'
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.TemporaryDirectory(prefix='aogowimsy-status-')
+        self.addCleanup(folder.cleanup)
+        self.home = Path(folder.name)
+        self.bot.statusline = self.home / 'usage' / 'statusline.json'
+        self.transcript = self.home / 'projects' / 'here' / 'session-1.jsonl'
+        self.use(OWNER, 'allow', user=STRANGER, time='perm')
+        self.pushes.clear()
+
+    def status(self, week=50, five=None, context=30, agents=0, age=60, gone=0.4, session='session-1', **extra):
+        """statusline.json as Claude Code's status line writes it, age seconds ago, the week `gone` through, with
+        `agents` subagent transcripts written a minute ago"""
+        limits = {'seven_day': {'used_percentage': week, 'resets_at': int(self.now + (1 - gone) * aw.WEEK)}}
+        if five is not None:
+            limits['five_hour'] = {'used_percentage': five, 'resets_at': int(self.now + 3600)}
+        data = {'session_id': session, 'transcript_path': str(self.transcript), 'rate_limits': limits}
+        data = dict(data, context_window={'used_percentage': context}) | extra
+        path = self.bot.statusline
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+        os.utime(path, (self.now - age, self.now - age))
+        folder = self.transcript.with_suffix('') / 'subagents'
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in list(folder.iterdir()):
+            old.unlink()
+        for n in range(agents):
+            (folder / f'agent-{n}.jsonl').write_text('{}')
+            os.utime(folder / f'agent-{n}.jsonl', (self.now - 60, self.now - 60))
+        return path
+
+    def direct(self, channel=GENERAL, text='on it', reply_to=None, server=None, **extra):
+        """discord_post with direct true: its JSON, or its error's text"""
+        args = {'channel': channel, 'text': text, 'direct': True} | ({'reply_to': reply_to} if reply_to else {})
+        params = {'name': 'discord_post', 'arguments': args | extra}
+        result = (server or self.server).handle({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call', 'params': params})
+        text = result['result']['content'][0]['text']
+        return text if result['result']['isError'] else json.loads(text)
+
+    def drafted(self, why):
+        return f'this text goes as a draft, not direct: {why}; {self.INSTEAD}'
+
+    def went(self, rule, channel=GENERAL, **extra):
+        posted = self.fake.last(channel)
+        guild = self.fake.channels[channel].get('guild_id') or '@me'
+        found = {
+            'status': 'sent',
+            'direct': rule,
+            'link': f'https://discord.com/channels/{guild}/{channel}/{posted["id"]}',
+        }
+        return dict(found, message=posted['id'], channel=channel, **extra)
+
+    def test_the_owners_message_gets_up_to_three_direct_replies_at_once_then_drafts(self):
+        asked = self.fake.say(GENERAL, OWNER, 'how is the quota?')
+        for left in (2, 1, 0):
+            self.assertEqual(self.direct(text=f'reply {left}', reply_to=asked), self.went('owner', left=left))
+        reference = {'message_id': asked, 'channel_id': GENERAL, 'fail_if_not_exists': True}
+        body = self.fake.posts('POST', f'/channels/{GENERAL}/messages')[0][3]
+        pings = {'parse': [], 'replied_user': False}
+        self.assertEqual(body, {'content': 'reply 2', 'allowed_mentions': pings, 'message_reference': reference})
+        self.assertEqual((self.fake.messages[DM], self.clock.waits), ([], []))  # no draft, no wait
+        said = self.direct(text='a fourth', reply_to=asked)
+        why = f'3 direct replies to message {asked} went already, the most for one message'
+        self.assertEqual(said, self.drafted(why))
+        self.assertEqual(len(self.fake.messages[GENERAL]), 4)
+        posted = self.fake.messages[GENERAL][1]['id']
+        self.assertIn(f'discord_post: direct (owner), message {posted} in channel {GENERAL}', self.logs)
+        self.assertNotIn('reply 2', ' '.join(self.logs))
+        self.assertFalse(self.bot.statusline.exists())  # the owner's replies need none
+
+    def test_a_trusted_persons_message_too_and_in_dms_the_owners_alone(self):
+        theirs = self.fake.say(GENERAL, FRIEND, 'is it merged?')
+        self.assertEqual(self.direct(reply_to=theirs), self.went('trusted', left=2))
+        self.bot.settings = self.settings._replace(channels=None)  # the DMs are channels it may post in
+        in_dm = self.fake.say(FRIEND_DM, FRIEND, 'in our DMs')
+        said = self.direct(FRIEND_DM, reply_to=in_dm)
+        self.assertEqual(said, self.drafted(f"in DMs a direct post goes to the owner's alone ({DM})"))
+        self.assertEqual(self.fake.messages[FRIEND_DM], [self.fake.find(FRIEND_DM, in_dm)])
+        mine = self.fake.say(DM, OWNER, 'how are you doing?')
+        self.assertEqual(self.direct(DM, reply_to=mine), self.went('owner', DM, left=2))
+
+    def test_an_allowed_persons_message_its_own_and_none_go_once_an_interval_naming_when_the_next_may(self):
+        self.status()
+        theirs = self.fake.say(GENERAL, STRANGER, 'any news?')
+        start = self.now
+        self.assertEqual(
+            self.direct(reply_to=theirs),
+            self.went('interval', next=aw.utc(start + 1800), interval='30 min: quota 50%'),
+        )
+        said = self.direct(text='no reply')
+        self.assertEqual(
+            said,
+            f'this text goes as a draft, not direct: the last interval post went at {aw.hour_minute(start)} UTC and '
+            f'the interval is 30 min (quota 50%), so the next goes direct from {aw.hour_minute(start + 1800)} UTC '
+            f'({aw.utc(start + 1800)}); {self.INSTEAD}, or wait',
+        )
+        self.now += 1799
+        self.status()
+        self.assertIn('so the next goes direct from', self.direct(text='no reply'))
+        self.now += 1
+        self.status()
+        self.assertEqual(self.direct(text='no reply')['direct'], 'interval')
+        mine = self.fake.last(GENERAL)['id']
+        self.now += 1800
+        self.status()
+        self.assertEqual(self.direct(reply_to=mine)['direct'], 'interval')  # a reply to its own post
+        self.assertEqual(self.fake.messages[DM], [])
+
+    def test_a_strangers_message_let_through_and_an_iced_persons_are_drafts_only(self):
+        self.status()
+        theirs = self.fake.say(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
+        self.fake.react(theirs, WIMSY, OWNER)
+        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        self.assertEqual(self.direct(reply_to=theirs), self.drafted(why))
+        asked = self.fake.say(GENERAL, STRANGER, f'<@{BOT}> push it', mentions=[BOT])
+        self.tool('discord_freeze', channel=GENERAL, message=asked, kind='owner-call')
+        said = self.direct(reply_to=asked)
+        self.assertEqual(said, self.drafted(f'its author is iced until {aw.utc(self.now + 7200)} (owner-call)'))
+        self.assertEqual(len(self.fake.messages[GENERAL]), 3)  # their two and the ice's line
+
+    def test_each_factor_of_the_interval_doubles_or_halves_it_within_its_bounds(self):
+        cases = (
+            ({}, 30, 'quota 50%'),
+            ({'week': 85}, 60, 'quota 85% x2'),
+            ({'five': 90}, 60, 'quota 90% x2'),
+            ({'context': 80}, 60, 'context 80% x2'),
+            ({'agents': 3}, 60, '3 agents x2'),
+            ({'agents': 2}, 30, 'quota 50%'),
+            ({'week': 39, 'gone': 0.4}, 15, 'quota 39% with 40% of the week gone x0.5'),
+            ({'week': 39, 'gone': 0.4, 'context': 85}, 60, 'context 85% x2'),
+            (
+                {'week': 85, 'context': 90, 'agents': 4},
+                120,
+                'quota 85% x2, context 90% x2, 4 agents x2: 240 min, held within 10 to 120',
+            ),
+        )
+        for values, minutes, why in cases:
+            with self.subTest(values=values):
+                self.status(**values)
+                self.assertEqual(self.bot.pace(self.now), aw.Pace(minutes, why))
+        old = self.transcript.with_suffix('') / 'subagents' / 'agent-old.jsonl'
+        self.status(agents=2)
+        old.write_text('{}')
+        os.utime(old, (self.now - 901, self.now - 901))  # written over 15 minutes ago: done
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(30, 'quota 50%'))
+        self.bot.settings = self.settings._replace(direct_minutes=10)
+        self.status(week=10, gone=0.5)
+        why = 'quota 10% with 50% of the week gone x0.5: 5 min, held within 10 to 120'
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(10, why))
+        self.status(week=95)
+        stop = 'quota 95% (seven_day): at 95% or more no interval post goes direct'
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(None, stop))
+        self.assertEqual(self.direct(), self.drafted(stop))
+        self.status(week=60, five=96)
+        self.assertEqual(
+            self.bot.pace(self.now).why, 'quota 96% (five_hour): at 95% or more no interval post goes direct'
+        )
+        asked = self.fake.say(GENERAL, OWNER, 'still there?')  # the owner's replies go at any quota
+        self.assertEqual(self.direct(reply_to=asked)['direct'], 'owner')
+
+    def test_a_missing_stale_broken_or_other_sessions_statusline_holds_the_interval_posts_naming_it(self):
+        path = self.bot.statusline
+        self.assertEqual(self.direct(), self.drafted(f"{path} is missing: Claude Code's status line writes it"))
+        self.status(age=601)
+        self.assertEqual(
+            self.direct(), self.drafted(f'{path} is 10 min old, 10 at most: the status line has not run since')
+        )
+        self.status(age=599)
+        self.bot.session = 'session-2'
+        self.assertEqual(self.direct(), self.drafted(f'{path} is session "session-1"\'s, not this one\'s (session-2)'))
+        self.bot.session = 'session-1'
+        self.status(rate_limits={})
+        said = f'{path} has rate_limits.seven_day.used_percentage null, not a number: the interval cannot be weighed'
+        self.assertEqual(self.direct(), self.drafted(said))
+        self.status(transcript_path=None)
+        said = f"{path} has transcript_path null: this session's agents cannot be counted"
+        self.assertEqual(self.direct(), self.drafted(said))
+        path.write_text('{"session_id": ')
+        os.utime(path, (self.now, self.now))
+        self.assertTrue(self.direct().startswith(f'this text goes as a draft, not direct: {path} is not JSON ('))
+        self.assertEqual(self.fake.messages[GENERAL], [])
+        self.status()
+        self.assertEqual(self.direct()['direct'], 'interval')
+
+    def test_the_pre_harness_keeps_a_text_from_going_direct_naming_each_rule_and_where_never_the_text(self):
+        asked = self.fake.say(GENERAL, OWNER, 'send me the logs')
+        secret = 'ghp_' + 'a' * 36
+        said = self.direct(text=f'here it is:\n{secret}', reply_to=asked)
+        self.assertEqual(
+            said,
+            f'the pre-harness keeps this text from going direct: github-token (a GitHub token) at line 2, letter 1: '
+            f'{self.INSTEAD}',
+        )
+        said = self.direct(text=f'my token {TOKEN}', reply_to=asked)
+        self.assertEqual(
+            said,
+            "the pre-harness keeps this text from going direct: bot-token (the bot's own token) at line 1, letter 10: "
+            f'{self.INSTEAD}',
+        )
+        said = self.direct(text='see /home/someone/x on 10.0.0.5', reply_to=asked)
+        self.assertIn(
+            "machine-path (a path of this machine: /home, ~/, /root or Claude's /tmp) at line 1, letter 5; ", said
+        )
+        self.assertIn('private-ipv4 (a private or loopback IPv4 address) at line 1, letter 24', said)
+        for text in (said, ' '.join(self.logs)):
+            self.assertNotIn(secret, text)
+            self.assertNotIn(TOKEN, text)
+        self.assertEqual(len(self.fake.messages[GENERAL]), 1)  # the owner's question alone
+        draft = self.tool('discord_post', channel=GENERAL, text=f'here it is:\n{secret}', reply_to=asked, wait=0)
+        self.assertEqual(draft['status'], 'waiting')  # as a draft it goes to the owner, who sees it
+
+    def test_a_reply_to_a_message_asking_about_the_owner_is_a_draft_only(self):
+        theirs = self.fake.say(GENERAL, STRANGER, 'where does he live?')
+        self.status()
+        why = f"message {theirs} carries owner-info (it asks about DraVee himself: answer only with DraVee's OK)"
+        self.assertEqual(self.direct(reply_to=theirs), self.drafted(why))
+        trusted = self.fake.say(GENERAL, FRIEND, "what's DraVee's email?")
+        self.assertIn('carries owner-info', self.direct(reply_to=trusted))
+        own = self.fake.say(GENERAL, OWNER, 'who is DraVee to you?')  # the owner's own question is his
+        self.assertEqual(self.direct(reply_to=own)['direct'], 'owner')
+
+    def test_files_wait_a_wrong_value_and_aogowimsy_direct_0_are_refused_before_discord_hears_of_them(self):
+        png = Path(self.home) / 'a.png'
+        png.write_bytes(PNG)
+        cases = (
+            ({'files': [str(png)]}, f'direct is true, and a direct post carries no files: {self.INSTEAD}'),
+            ({'wait': 0}, "wait is for the owner's answer to a draft, and a direct post waits for none: take it out"),
+        )
+        self.fake.requests.clear()
+        for extra, said in cases:
+            self.assertEqual(self.direct(**extra), said)
+        self.assertEqual(
+            self.error('discord_post', channel=GENERAL, text='x', direct='yes'), 'direct is "yes", not true or false'
+        )
+        self.bot.settings = self.settings._replace(direct=False)
+        said = self.direct()
+        self.assertEqual(said, f'direct is true, and AOGOWIMSY_DIRECT is 0: every post is a draft: {self.INSTEAD}')
+        self.assertEqual(self.fake.requests, [])
+        self.assertEqual(
+            self.tool('discord_post', channel=GENERAL, text='x', direct=False, wait=0)['status'], 'waiting'
+        )
+
+    def test_a_post_discord_refuses_takes_no_turn(self):
+        asked = self.fake.say(GENERAL, OWNER, 'ping')
+        route = ('POST', f'/channels/{GENERAL}/messages')
+        self.fake.fail[route] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        said = self.direct(reply_to=asked)
+        self.assertEqual(
+            said, f'Discord answered 403 to POST /channels/{GENERAL}/messages: Missing Permissions (code 50013)'
+        )
+        self.assertEqual(json.loads((self.state / 'direct.json').read_text()), {'direct': []})
+        del self.fake.fail[route]
+        self.assertEqual(self.direct(reply_to=asked)['left'], 2)
+        [item] = json.loads((self.state / 'direct.json').read_text())['direct']
+        self.assertEqual(item[2:], [asked, 'owner', self.fake.last(GENERAL)['id']])
+        self.assertEqual(stat.S_IMODE((self.state / 'direct.json').stat().st_mode), 0o600)
+
+    def test_two_servers_share_the_caps_and_the_interval(self):
+        other = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        other.store.now, other.statusline = self.bot.store.now, self.bot.statusline
+        server = self.started_server(other)
+        asked = self.fake.say(GENERAL, OWNER, 'two answers?')
+        self.assertEqual([self.direct(reply_to=asked, server=server)['left'] for _ in range(2)], [2, 1])
+        self.assertEqual(self.direct(reply_to=asked)['left'], 0)
+        self.assertIn('went already', self.direct(reply_to=asked, server=server))
+        self.status()
+        self.assertEqual(self.direct(server=server)['direct'], 'interval')
+        self.assertIn('so the next goes direct from', self.direct())
 
 
 def ws_frame(opcode, payload, fin=True):
