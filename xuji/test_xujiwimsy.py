@@ -178,17 +178,22 @@ class Handshake(WithXuji):
         # Aogo's drawings' and its command's (the allows, the ice, which its state holds), which Xuji has not
         aogos = ('discord_emoji_upload', 'discord_allowed', 'discord_freeze')
         as_aogo = json.loads(text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY'))
-        drafts = json.loads(
-            json.dumps(aogo[0])
-        )  # AogoWimsy's discord_post less its direct posts, which Xuji makes none of
+        # discord_post less what each says of direct posts, which Xuji makes none of: its own direct says so
+        drafts = json.loads(json.dumps(aogo[0]))
         self.assertEqual(drafts['name'], 'discord_post')
         drafts['description'] = drafts['description'].removesuffix(aw.direct_text(aw.AOGO))
         del drafts['inputSchema']['properties']['direct']
+        del as_aogo[0]['inputSchema']['properties']['direct']
         self.assertEqual(
             [tool for tool in as_aogo if tool['name'] not in reacting],
             [drafts] + [tool for tool in aogo[1:] if tool['name'] not in (*reacting, *aogos)],
         )
-        self.assertNotIn('direct', text)
+        said = xuji[0]['inputSchema']['properties']['direct']['description']
+        drafts_only = (
+            "XujiWimsy posts drafts only, its client's quota not being Claude Code's: true is an error saying so"
+        )
+        self.assertEqual(said, drafts_only)
+        self.assertNotIn('direct post', text)
         self.assertEqual([tool['name'] for tool in xuji], [name for name in aw.TOOL_NAMES if name not in aogos])
         for name in aogos:
             call = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': name}}

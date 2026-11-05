@@ -899,7 +899,8 @@ def command_text(settings):
             f'{REPLIES} replies to that message; "direct now" or "direct from HH:MM UTC": once an interval, longer '
             'with '
             'Claude Code\'s quota, context or agents high; "draft only: why": post without direct, and the owner\'s '
-            f'{YES} decides. A direct post the rules refuse is an error naming why: then send the draft yourself. Its '
+            f'{YES} decides. A direct post the rules refuse is an error naming the rule, and for the interval when the '
+            'next may go: then send the draft yourself. Its '
             "text passes the pre-harness first (tokens, keys, this machine's paths, private addresses, e-mails, title "
             'IDs), and anything about DraVee himself is his to allow, in a draft. '
         )
@@ -4039,7 +4040,9 @@ def reacting_schema(identity, emoji):
 
 
 def direct_text(identity):
-    """what discord_post says of its direct posts, for a bot that makes them"""
+    """what discord_post says of its direct posts: for a bot that makes none, nothing (its direct says why)"""
+    if not identity.direct:
+        return ''
     return (
         " With direct true it posts at once, with no draft, pinging no one, when the server's rules let it: a reply "
         f"to the owner's message or a trusted person's, {REPLIES} at most each (in DMs, the owner's alone); a reply to "
@@ -4111,9 +4114,10 @@ def tool_list(identity):
         {
             'name': 'discord_post',
             'description': (
-                f"Post a message on Discord once the owner approves it. The draft goes to the owner's DMs with {me} "
-                f"(the text and its images, and under it where it goes) with {YES} and {NO}: only the owner's {YES} "
-                "posts it, as it is, pinging no one; another person's reaction counts for nothing. It posts in the "
+                "Post a message on Discord as a draft the owner approves first. The draft goes to the owner's DMs "
+                f'with {me} (the text and its images, and under it where it goes) with {YES} and {NO}: only the '
+                f"owner's {YES} posts it, as it is, pinging no one; another person's reaction counts for nothing. It "
+                'posts in the '
                 f'channels {channels} lists and their threads, or in any Discord lets the bot see when it lists none. '
                 'Waits up to `wait` seconds for the answer, then returns JSON: {"status": "sent", "link", "message", '
                 '"channel", "draft"} when approved; {"status": "not sent", "channel", "draft"} when refused; {"status": '
@@ -4306,15 +4310,19 @@ def tool_list(identity):
             'additionalProperties': False,
         },
     }
-    if identity.direct:
-        tools[0]['description'] += direct_text(identity)
-        tools[0]['inputSchema']['properties']['direct'] = {
-            'type': 'boolean',
-            'default': False,
-            'description': (
-                "true: post at once, with no draft, when the server's rules let it; else an error naming why"
-            ),
-        }
+    tools[0]['description'] += direct_text(identity)
+    tools[0]['inputSchema']['properties']['direct'] = {  # every identity's handler takes it: XujiWimsy to refuse it
+        'type': 'boolean',
+        'default': False,
+        'description': (
+            "true: post at once, with no draft, where the server's rules let it (who wrote reply_to, 3 replies a "
+            'message, the interval, the pre-harness on the text); a refusal is an error naming the rule and, for the '
+            'interval, when the next may go: then post without it, as a draft'
+            if identity.direct
+            else f"{identity.title} posts drafts only, its client's quota not being Claude Code's: true is an error "
+            'saying so'
+        ),
+    }
     owned = [allowed, freeze] if identity.command else []
     return tools + ([upload] if identity.drawn else []) + owned
 
