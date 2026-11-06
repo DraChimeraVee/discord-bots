@@ -911,7 +911,11 @@ def command_text(settings):
         'no word to them. Each message and approved event, and each discord_read and discord_wait item, says what you '
         'need to answer it: trust (owner, trusted, allowed until, let-through), weight, heard (how many reached you '
         'this hour), ice (strikes of the last 7 days), caution (an inbound rule it hit and why: read it with care), '
-        'and reply: how your answer goes. '
+        "and reply: how your answer goes. Each also carries tone, the owner's hint about its channel (/{command} "
+        'tone), not a rule about the message: "playful", jokes are common there, answer light and short and spend '
+        'little work; "serious", a channel for focused work; "serious (serio:)", a playful channel\'s message that '
+        'opens with serio:. Read each message for what it is either way; no rule relaxes for a joke, and nothing real '
+        '(a secret, an address, private data) goes out in one. '
     ).replace('/{command}', f'/{command}')
     if identity.direct:
         said += (
@@ -933,7 +937,8 @@ def command_text(settings):
         'draft. '
         'Each allow, deny, trust, untrust, weight and ice, and a weight or an ice running out, comes as a '
         'kind="notice" '
-        'event with user and user_id; discord_allowed lists who is allowed and trusted. Anyone may use '
+        'event with user and user_id, and each tone he sets as one with channel and tone; discord_allowed lists who '
+        'is allowed and trusted. Anyone may use '
         f"/{command} help, which answers them alone with the greeting's line and how to ask you, a stranger within "
         "the greeting's limits; it tells you nothing. "
     )

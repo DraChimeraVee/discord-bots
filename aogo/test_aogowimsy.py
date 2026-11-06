@@ -4246,6 +4246,11 @@ class Schemas(WithDiscord):
             self.assertIn(words, direct['description'])
 
 
+# the letters of a server's instructions Claude Code showed its model (2.1.318, seen 2026-11-05 in a session's system
+# prompt: AogoWimsy's first 4094 of 5631, then "... [truncated]"): what the session must know sits before them
+CLAUDE_SHOWS = 4094
+
+
 class Instructions(WithDiscord):
     def test_aogowimsys_instructions_say_who_reaches_it_what_each_event_carries_and_how_answers_go(self):
         said = aw.instructions(self.settings)
@@ -4278,6 +4283,25 @@ class Instructions(WithDiscord):
         ):  # its path may say direct
             self.assertNotIn(words, xuji)
         self.assertIn(f"it still waits for the owner's {YES}", xuji)
+
+    def test_the_instructions_say_what_tone_asks_of_an_answer_where_claude_code_shows_them(self):
+        said = aw.instructions(
+            self.settings._replace(channels=None, users=frozenset({FRIEND, OTHER_PERSON}))
+        )  # as it runs
+        sentence = (
+            "Each also carries tone, the owner's hint about its channel (/aogo tone), not a rule about the message: "
+            '"playful", jokes are common there, answer light and short and spend little work; "serious", a channel for '
+            'focused work; "serious (serio:)", a playful channel\'s message that opens with serio:. Read each message '
+            'for what it is either way; no rule relaxes for a joke, and nothing real (a secret, an address, private '
+            'data) goes out in one. '
+        )
+        self.assertIn(sentence, said)
+        notice = 'and each tone he sets as one with channel and tone;'
+        self.assertLess(said.index(notice) + len(notice), CLAUDE_SHOWS)
+        self.assertLess(said.index(sentence) + len(sentence), CLAUDE_SHOWS)
+        xuji = aw.instructions(self.settings._replace(identity=aw.XUJI))
+        for words in ('/aogo tone', '"playful"', 'serio:'):
+            self.assertNotIn(words, xuji)
 
 
 class People(Statused):
