@@ -17,7 +17,7 @@ Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy
 
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
-| `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through eleven MCP tools: post (once its owner approves the draft, or at once where the rules he sets let it), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), upload the server's custom emojis it answers with, list who its owner allowed, and ice someone who tried what its harness refuses. A slash command, `/aogo`: help for anyone, and its owner's trust, allow, weight and ice for people. A pre-harness of rules checks what comes in and what goes out direct. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, each event saying how much its author is trusted and how an answer may go, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, those he trusts or allowed (as much as their weight lets) and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message; Claude Code's status line (the quota, the context, this session's agents) | to Discord, the drafts (to its owner's DMs), the posts approved, the direct posts, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it, the pre-harness's and the ice's fixed lines, `/aogo` and its answers (seen by their asker alone), `/aogo people` (to its owner's DMs); to the session, the messages it may read and the ones addressed to it |
+| `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through eleven MCP tools: post (once its owner approves the draft, or at once where the rules he sets let it), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), upload the server's custom emojis it answers with, list who its owner allowed, and ice someone who tried what its harness refuses. A slash command, `/aogo`: help for anyone, and its owner's trust, allow, weight and ice for people and tone for channels. A pre-harness of rules checks what comes in and what goes out direct. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, each event saying how much its author is trusted, how an answer may go and its channel's tone, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, those he trusts or allowed (as much as their weight lets) and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message; Claude Code's status line (the quota, the context, this session's agents) | to Discord, the drafts (to its owner's DMs), the posts approved, the direct posts, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it, the pre-harness's and the ice's fixed lines, `/aogo` and its answers (seen by their asker alone), `/aogo people` (to its owner's DMs); to the session, the messages it may read and the ones addressed to it |
 | `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and eight of its tools, with Xuji's bot and settings, its reactions and quick replies the unicode emojis alone. It pushes what is addressed to Xuji, its owner's answers to its drafts and the gateway's news to the session's monitor, a line each, as Grok Build takes no push from an MCP server | as AogoWimsy | as AogoWimsy, but to the session's monitor (a local socket) in place of a claude/channel, no drawn emoji, and it greets no one and has no command |
 
 No bot keeps a message or logs what was said, and none pings anyone but AogoWimsy's greeting and its ice lines, which
@@ -102,19 +102,20 @@ of it and never for a subcommand; each answer is seen by its asker alone and pin
 | `/aogo unfreeze user` | the owner | ends their ice now; their strikes stay |
 | `/aogo admins role` | the owner | that server's admin role, which the ice lines for a secret or abuse ping |
 | `/aogo people` | the owner | sends him, in his DMs with AogoWimsy, everyone with a state: trusted or allowed until when, their weight and until when, their ice and strikes of the last 7 days, and of the last 24 hours the messages that reached the session, were only counted, or were rejected by each rule, and the direct replies to theirs; then the interval in force and why, and the direct posts of the day |
+| `/aogo tone [channel mode]` | the owner | sets that channel's tone, `playful` (jokes are common there: light, short answers) or `serious` (focused work), a hint each of its messages carries to the session; a thread takes its channel's unless set itself. Alone, every channel's tone. Without one set, the server's #general (`1558959542543589416`) is playful, every other channel and DMs serious; in a playful channel a message that starts with `serio:` (any case, with or without the accent, after spaces or mentions) is serious. A channel without a mode, or a mode without one, is refused naming the tone in force |
 
 Anyone but the owner who uses one of his is answered `Only @DraVee can use /aogo allow.`, and nothing changes. The owner
 is never limited, trusted or iced, and the bot is none of them. An allowed person's addressed messages and DMs reach the
 session (`kind="message"`; `discord_read`, `discord_wait` and `from` take them) until the allow runs out; then they are
 a stranger again (counted, greeted), and nothing is said to them. Each allow, deny, trust, untrust, weight and ice wakes
-the session as a `notice` naming the person and what changed; help, allowed, admins and people tell it nothing. Every
-session's server hears each use: the first to take the state's lock answers it and writes down its answer and notice,
-the others see it answered and tell their session the same notice, so a use is answered once and each session hears it
-once. Discord takes an answer for 3 s: a use is answered in a thread of its own, ahead of whatever the gateway's queue
-holds, and the answer needs no Discord call before it, so it never waits for a deferral. A server whose install lacks
-the `applications.commands` scope wakes the session as an `error` that gives the invite with that scope (Discord's 403,
-Missing Access); an answer Discord refuses is an `error` too, with the interaction's token left out, and an allow it
-made stays.
+the session as a `notice` naming the person and what changed, and each tone set as one naming the channel and the tone;
+help, allowed, admins, people and tone alone tell it nothing. Every session's server hears each use: the first to take
+the state's lock answers it and writes down its answer and notice, the others see it answered and tell their session the
+same notice, so a use is answered once and each session hears it once. Discord takes an answer for 3 s: a use is
+answered in a thread of its own, ahead of whatever the gateway's queue holds, and the answer needs no Discord call
+before it, so it never waits for a deferral. A server whose install lacks the `applications.commands` scope wakes the
+session as an `error` that gives the invite with that scope (Discord's 403, Missing Access); an answer Discord refuses
+is an `error` too, with the interaction's token left out, and an allow it made stays.
 
 Nothing is stored but the attachments `discord_attachments` is asked for (folders 700, files 600, kept until someone
 removes them), and the bot's state, in `<XDG_STATE_HOME or ~/.local/state>/aogowimsy/` (folder 700, files 600), so a
@@ -125,14 +126,15 @@ restart keeps it: `greetings.json` and `helps.json`, the time and the person's i
 its change are made under the lock `state.lock` beside them, so one of them greets or answers and the others see it
 done. Beside them: `people.json` (each person's trust, weight, ice and strikes), `heard.json` (what became of each
 message of a trusted, allowed or let-through person of the last day, so two sessions count it once), `direct.json` (each
-direct post of the last day, so they share the caps and the interval), `admins.json` (each server's admin role) and
-`flags.json` (the notes to the owner said once). A file there it did not write stops what reads it (the greetings, the
-help, the allows or the commands), and each call or use then wakes the session as an `error` naming the file and what is
-wrong in it; nothing rewrites it until it is mended or removed. A draft waiting is its message in the owner's DMs, read
-again at each look, so a restart loses none; what the owner let through is kept in memory while it runs; stderr says
-what ran or failed, never what was said nor who said it. A 429 waits its `retry_after` and tries again; any other
-failure comes back to the session with Discord's status and message, as does a value a tool refuses, named with what it
-takes.
+direct post of the last day, so they share the caps and the interval), `admins.json` (each server's admin role),
+`tones.json` (each channel's tone the owner set, where it differs from the one it has without it) and `flags.json` (the
+notes to the owner said once). A file there it did not write stops what reads it (the greetings, the help, the allows or
+the commands), and each call or use then wakes the session as an `error` naming the file and what is wrong in it (a
+`tones.json` it cannot read makes each message's `tone` `unknown:` and why); nothing rewrites it until it is mended or
+removed. A draft waiting is its message in the owner's DMs, read again at each look, so a restart loses none; what the
+owner let through is kept in memory while it runs; stderr says what ran or failed, never what was said nor who said it.
+A 429 waits its `retry_after` and tries again; any other failure comes back to the session with Discord's status and
+message, as does a value a tool refuses, named with what it takes.
 
 It serves Claude Code alone, so that no other client posts as Aogo: an `initialize` whose `clientInfo` name is not
 `claude-code` (Claude Code's) gets an error naming that name and XujiWimsy, the server logs it, and nothing reaches
@@ -204,11 +206,11 @@ body:
 
 | `kind` | What wakes the session | Its attributes |
 |---|---|---|
-| `message` | a message addressed to AogoWimsy (a mention, or a reply to one of its messages) from the owner, someone he trusts or allowed, in a channel it may read, within their weight and passing the pre-harness; any DM one of them sends it. When the owner replies to someone while mentioning AogoWimsy, the text ends with the message he replied to, whole | `author`, `author_id`, `channel`, `message_id`, `reply_to`, `attachments`; `quoted_author`, `quoted_author_id`, `quoted_attachments` for the owner's reply; and so the session needs no rule in its head: `trust` (`owner`, `trusted`, `allowed until ...`, `let-through`), `weight` and `heard` (`2 of 30 this hour`) for someone trusted or allowed, `ice` (strikes of the last 7 days), `caution` (each inbound rule it hit, and why), `reply` (`direct, up to 3`, `direct from 14:30 UTC (interval 30 min: quota 56%)`, `draft only: ...`) |
+| `message` | a message addressed to AogoWimsy (a mention, or a reply to one of its messages) from the owner, someone he trusts or allowed, in a channel it may read, within their weight and passing the pre-harness; any DM one of them sends it. When the owner replies to someone while mentioning AogoWimsy, the text ends with the message he replied to, whole | `author`, `author_id`, `channel`, `message_id`, `reply_to`, `attachments`; `quoted_author`, `quoted_author_id`, `quoted_attachments` for the owner's reply; and so the session needs no rule in its head: `trust` (`owner`, `trusted`, `allowed until ...`, `let-through`), `weight` and `heard` (`2 of 30 this hour`) for someone trusted or allowed, `ice` (strikes of the last 7 days), `caution` (each inbound rule it hit, and why), `tone` (`playful`, `serious`, `serious (serio:)`, or `unknown: ...` when its channel or `tones.json` cannot be read), `reply` (`direct, up to 3`, `direct from 14:30 UTC (interval 30 min: quota 56%)`, `draft only: ...`) |
 | `approved` | a stranger's message addressed to AogoWimsy, once the owner puts his `:wimsyaogo:` reaction on it, once, passing the pre-harness | as `message` |
 | `dm` | someone neither the owner nor listed wrote to AogoWimsy in DMs: their name and id, never what they wrote; once a person while it runs | `author`, `author_id` |
 | `draft` | the owner's check mark or cross on a draft this session made, still waiting: it is posted or refused then, not on a tool's next look (another session's draft waits for that session) | `draft`, `status` (sent, not sent), `channel`; `message_id` once posted |
-| `error`, `notice` | the gateway stopped (a close code Discord takes no new try after: a token that is not the bot's, intents not turned on), cannot be reached for three tries in a row, or is back; a greeting, a registration or an answer to `/aogo` that failed; a state file it cannot read; the owner's allow, deny, trust, untrust, weight or unfreeze, a weight or an ice running out, an ice another session made, and a message the pre-harness rejected (each a `notice`) | `user`, `user_id`, and what changed: `until` (an ISO 8601 time in UTC, `permanent`, `denied`, `ran out`), `trust`, `weight`, `ice`; a rejection: `channel` and `rule` |
+| `error`, `notice` | the gateway stopped (a close code Discord takes no new try after: a token that is not the bot's, intents not turned on), cannot be reached for three tries in a row, or is back; a greeting, a registration or an answer to `/aogo` that failed; a state file it cannot read; the owner's allow, deny, trust, untrust, weight, unfreeze or tone, a weight or an ice running out, an ice another session made, and a message the pre-harness rejected (each a `notice`) | `user`, `user_id`, and what changed: `until` (an ISO 8601 time in UTC, `permanent`, `denied`, `ran out`), `trust`, `weight`, `ice`; a tone: `channel` and `tone`; a rejection: `channel` and `rule` |
 
 Nothing else wakes it: a message not addressed to AogoWimsy, anything a stranger says before the owner lets it through
 (a call it greeted too), its own messages. Without the flag, the gateway still runs and feeds `discord_wait`, and Claude
@@ -352,7 +354,9 @@ once, the deprecation DM once; the ice: each kind's line and admin ping, the day
 and the trusted never iced; the pre-harness: every rule's own examples, the loader's refusals, the emoji joiners, the
 languages, the owner's exemption, a rejection told and answered once; direct posts: each row of the table, the cap of 3,
 each factor of the interval and its bounds, a statusline missing, stale or another session's, each outbound rule, a
-refused post taking no turn; each event's attributes and `/aogo people`), and its gateway client against a fake gateway
+refused post taking no turn; each event's attributes and `/aogo people`; `/aogo tone`: the owner's alone, the
+default, threads, the `serio:` trigger in any case with or without its accent, the item kept only where it differs, a
+restart, the notice, an unreadable file or channel said in `tone`), and its gateway client against a fake gateway
 on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the close codes that stop it, pings, messages in frames), and
 that lines from several threads never mix on stdout; XujiWimsy's env file and keys (the other bot's refused, and its
 example AogoWimsy's in its names), its server, instructions and tools in its own names (no drawn emoji: the unicode ones
