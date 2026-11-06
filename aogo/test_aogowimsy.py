@@ -2058,12 +2058,12 @@ class Hearing(WithDiscord):
         self.ear.hear('MESSAGE_CREATE', self.fake.event(channel, number))
         return number
 
-    def about(self, who, heard=1, kind='message', until=None):
+    def about(self, who, heard=1, kind='message', until=None, tone='serious'):
         """what a message event of who says of them and of how to answer, as these tests have it: no strike, no
-        statusline.json; until: an allowed person's allow's end"""
+        statusline.json, a channel no tone was set for; until: an allowed person's allow's end"""
         if who == OWNER:
-            return {'trust': 'owner', 'reply': 'direct, up to 3'}
-        ice = {'ice': '0 strikes of the last 7 days'}
+            return {'trust': 'owner', 'tone': tone, 'reply': 'direct, up to 3'}
+        ice = {'ice': '0 strikes of the last 7 days', 'tone': tone}
         if kind == 'approved':
             why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
             return {'trust': 'let-through', 'reply': f'draft only: {why}'} | ice
@@ -2562,10 +2562,11 @@ OWNERS_HELP = (
     "1d without a time; then their level's again\n"
     '/aogo unfreeze user: ends their ice now; their strikes stay\n'
     "/aogo admins role: this server's admin role, which the ice lines for a secret or abuse ping\n"
-    '/aogo people: who has a state, and how much reached me, in your DMs with me'
+    '/aogo people: who has a state, and how much reached me, in your DMs with me\n'
+    "/aogo tone [channel mode]: a channel's tone for me, playful or serious; alone, every channel's"
 )
 # /aogo's subcommands, as a log and an answer name them
-SUBS = 'help, allow, deny, allowed, trust, untrust, weight, unfreeze, admins, people'
+SUBS = 'help, allow, deny, allowed, trust, untrust, weight, unfreeze, admins, people, tone'
 TIME_CHOICES = [
     {'name': '2 hours', 'value': '2h'},
     {'name': '1 day', 'value': '1d'},
@@ -2652,6 +2653,24 @@ AOGO_COMMAND = {
             'options': [{'type': 8, 'name': 'role', 'description': 'The admin role', 'required': True}],
         },
         {'type': 1, 'name': 'people', 'description': 'DraVee only: who reaches Aogo and how much, in your DMs with it'},
+        {
+            'type': 1,
+            'name': 'tone',
+            'description': "DraVee only: a channel's tone for Aogo; alone, every channel's",
+            'options': [
+                {
+                    'type': 7,
+                    'name': 'channel',
+                    'description': "The channel; a thread takes its channel's tone unless set itself",
+                },
+                {
+                    'type': 3,
+                    'name': 'mode',
+                    'description': 'playful: jokes are common there; serious: focused work',
+                    'choices': [{'name': 'playful', 'value': 'playful'}, {'name': 'serious', 'value': 'serious'}],
+                },
+            ],
+        },
     ],
 }
 
@@ -2664,13 +2683,13 @@ class Owned(Hearing):
         self.start = self.now = 1_800_000_000.0
         self.bot.store.now = lambda: self.now
 
-    def used(self, who, sub, channel=GENERAL, name='aogo', **options):
-        """a use of the command as the gateway brings it"""
+    def used(self, who, sub, at=GENERAL, name='aogo', **options):
+        """a use of the command in channel `at` as the gateway brings it, a channel option resolved as Discord does"""
         self.fake.serial += 1
         number = str(self.fake.serial)
+        types = {'user': aw.USER_OPTION, 'channel': aw.CHANNEL_OPTION}
         values = [
-            {'name': key, 'type': aw.USER_OPTION if key == 'user' else aw.STRING_OPTION, 'value': value}
-            for key, value in options.items()
+            {'name': key, 'type': types.get(key, aw.STRING_OPTION), 'value': value} for key, value in options.items()
         ]
         data = {'id': '800000000000000000', 'name': name, 'type': 1, 'options': [{'type': 1, 'name': sub}]}
         if values:
@@ -2678,13 +2697,17 @@ class Owned(Hearing):
         if 'user' in options:
             user = options['user']
             data['resolved'] = {'users': {user: self.fake.user(user)}, 'members': {user: {'nick': None}}}
+        if options.get('channel') in self.fake.channels:
+            found = self.fake.channels[options['channel']]
+            shown = {key: found[key] for key in ('id', 'name', 'type', 'parent_id') if key in found}
+            data.setdefault('resolved', {})['channels'] = {found['id']: shown}
         return {
             'id': number,
             'application_id': APP,
             'type': aw.APPLICATION_COMMAND,
             'data': data,
             'guild_id': GUILD,
-            'channel_id': channel,
+            'channel_id': at,
             'member': {'user': self.fake.user(who), 'roles': []},
             'token': f'token-{number}',
             'version': 1,
@@ -4026,6 +4049,164 @@ class About(Statused):
         )
 
 
+PLAYFUL = '1558959542543589416'  # the server's #general, playful by default (DraVee, 2026-11-06)
+PLAYFUL_THREAD = '300000000000000014'  # a thread of it, which the gateway never brought
+RULE = "A thread takes its channel's tone unless set itself. In a playful channel a message that starts with serio: is serious."
+PLAYFUL_MEANS = 'jokes are common there, so answers go light and short, spending little work'
+TRIGGER = 'A message there that starts with serio: is serious.'
+
+
+class Tone(Owned):
+    """/aogo tone: each channel's tone, the server's #general playful when the owner set none, carried by every message
+    the session gets and every item discord_read and discord_wait give"""
+
+    def setUp(self):
+        super().setUp()
+        guild = {'type': 0, 'guild_id': GUILD}
+        self.fake.channels[PLAYFUL] = dict(guild, id=PLAYFUL, name='general')
+        self.fake.channels[PLAYFUL_THREAD] = dict(guild, id=PLAYFUL_THREAD, name='jokes', type=11, parent_id=PLAYFUL)
+        for channel in (PLAYFUL, PLAYFUL_THREAD):
+            self.fake.messages[channel] = []
+        self.bot.settings = self.settings._replace(channels=None)  # every channel it sees, as AogoWimsy runs
+
+    def tone(self, channel, text, who=OWNER, ear=None):
+        """the tone a message addressed to the bot carries to the session"""
+        number = self.fake.say(channel, who, text, mentions=[BOT])
+        (ear or self.ear).hear('MESSAGE_CREATE', self.fake.event(channel, number))
+        meta = self.pushes[-1][1]
+        self.assertEqual(meta['message_id'], number)
+        return meta['tone']
+
+    def test_the_servers_general_and_its_threads_are_playful_every_other_channel_and_dms_serious(self):
+        self.assertEqual(aw.TONES, {PLAYFUL: 'playful'})
+        self.assertEqual(self.tone(PLAYFUL, 'hi'), 'playful')
+        for _ in range(2):
+            self.assertEqual(self.tone(PLAYFUL_THREAD, 'in its thread'), 'playful')
+        self.assertEqual(len(self.fake.posts('GET', f'/channels/{PLAYFUL_THREAD}')), 1)  # asked once
+        for channel in (GENERAL, HELP, OTHER, THREAD):
+            self.assertEqual(self.tone(channel, 'elsewhere'), 'serious')
+        self.assertFalse(self.fake.posts('GET', f'/channels/{THREAD}'))  # the gateway's GUILD_CREATE said its parent
+        self.assertEqual(self.tone(DM, 'serio: in DMs'), 'serious')
+        self.assertEqual(self.tone(FRIEND_DM, 'hi', FRIEND), 'serious')
+        self.assertEqual(self.tone(PLAYFUL, 'hi', FRIEND), 'playful')  # whoever writes
+
+    def test_serio_at_the_start_makes_a_playful_channels_message_serious_in_any_case_with_or_without_the_accent(self):
+        for text in (
+            'serio: a real bug',
+            'SERIO: a real bug',
+            '   Serio: after spaces',
+            's\u00e9rio: with the accent',
+            'S\u00c9RIO: and upper case',
+            'se\u0301rio: its accent a letter of its own',
+            f'<@{BOT}> serio: after the mention',
+            f'<@!{BOT}>  <@&{BOT_ROLE}> s\u00e9rio: after two',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.tone(PLAYFUL, text), 'serious (serio:)')
+        for text in ('not serio: there', 'serio no colon', 'serious: a longer word', 'serio : a space', 'lol serio:'):
+            with self.subTest(text=text):
+                self.assertEqual(self.tone(PLAYFUL, text), 'playful')
+        self.assertEqual(self.tone(PLAYFUL_THREAD, 'serio: in its thread'), 'serious (serio:)')
+        self.assertEqual(self.tone(OTHER, 'serio: where it is serious'), 'serious')
+
+    def test_tone_alone_lists_every_channels_and_anyone_but_the_owner_is_told_it_is_his(self):
+        self.assertEqual(
+            self.use(OWNER, 'tone'),
+            f'Playful: <#{PLAYFUL}> (the default).\nSerious: every other channel, and DMs.\n{RULE}',
+        )
+        for who in (STRANGER, FRIEND):
+            self.assertEqual(self.use(who, 'tone'), f'Only <@{OWNER}> can use /aogo tone.')
+            said = self.use(who, 'tone', channel=OTHER, mode='playful')
+            self.assertEqual(said, f'Only <@{OWNER}> can use /aogo tone.')
+        self.assertFalse((self.state / 'tones.json').exists())
+        self.assertEqual(self.pushes, [])
+        self.use(OWNER, 'tone', channel=OTHER, mode='playful')
+        self.use(OWNER, 'tone', channel=PLAYFUL, mode='serious')
+        self.assertEqual(
+            self.use(OWNER, 'tone'),
+            f'Playful: <#{OTHER}> (yours).\nSerious: <#{PLAYFUL}> (yours, playful by default), every other channel, and '
+            f'DMs.\n{RULE}',
+        )
+
+    def test_a_tone_set_reaches_events_reads_and_waits_is_told_to_the_session_and_outlives_a_restart(self):
+        said = self.use(OWNER, 'tone', channel=GENERAL, mode='playful')
+        self.assertEqual(said, f'<#{GENERAL}> is playful now: {PLAYFUL_MEANS}; it was serious. {TRIGGER}')
+        text = f'The owner set #general ({GENERAL}) to tone playful: {PLAYFUL_MEANS}; it was serious. {TRIGGER}'
+        self.assertEqual(self.notices(), [(text, {'kind': 'notice', 'channel': GENERAL, 'tone': 'playful'})])
+        path = self.state / 'tones.json'
+        self.assertEqual(json.loads(path.read_text()), {'tones': [[GENERAL, 'playful']]})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(self.tone(GENERAL, 'hi'), 'playful')
+        self.assertEqual(self.tone(THREAD, 'serio: in its thread'), 'serious (serio:)')
+        read = self.tool('discord_read', channel=GENERAL)['messages']
+        self.assertEqual([item['tone'] for item in read], ['playful'])
+        read = self.tool('discord_read', channel=THREAD)['messages']  # Discord's channel says its parent
+        self.assertEqual([item['tone'] for item in read], ['serious (serio:)'])
+        after = self.fake.last(THREAD)['id']
+        self.clock.at(1, lambda: self.arrive(THREAD, FRIEND, 'a thread joke'))
+        self.assertEqual(self.tool('discord_wait', channel=THREAD, after=after, wait=10)['message']['tone'], 'playful')
+        self.assertEqual(self.use(OWNER, 'tone', channel=GENERAL, mode='playful'), f'<#{GENERAL}> is playful already.')
+        self.assertEqual(len(self.notices()), 1)
+        _, ear = self.restarted(self.now)  # a new server, its state read again from the folder
+        self.assertEqual(self.tone(GENERAL, 'after a restart', ear=ear), 'playful')
+        self.assertEqual(self.tone(HELP, 'after a restart', ear=ear), 'serious')
+
+    def test_a_thread_set_itself_and_a_tone_set_back_to_its_default_keeps_no_item(self):
+        self.use(OWNER, 'tone', channel=GENERAL, mode='playful')
+        said = self.use(OWNER, 'tone', channel=THREAD, mode='serious')
+        self.assertEqual(said, f'<#{THREAD}> is serious now: a channel for focused work; it was playful.')
+        self.assertEqual(self.tone(THREAD, 'focused'), 'serious')
+        self.assertEqual(self.tone(GENERAL, 'still'), 'playful')
+        self.use(OWNER, 'tone', channel=GENERAL, mode='serious')
+        self.use(OWNER, 'tone', channel=PLAYFUL, mode='serious')
+        tones = self.state / 'tones.json'
+        self.assertEqual(json.loads(tones.read_text()), {'tones': [[THREAD, 'serious'], [PLAYFUL, 'serious']]})
+        self.assertEqual(self.tone(PLAYFUL_THREAD, 'its channel set serious'), 'serious')
+        said = self.use(OWNER, 'tone', channel=PLAYFUL, mode='playful')
+        self.assertEqual(said, f'<#{PLAYFUL}> is playful now: {PLAYFUL_MEANS}; it was serious. {TRIGGER}')
+        self.assertEqual(json.loads(tones.read_text()), {'tones': [[THREAD, 'serious']]})
+        text, meta = self.notices()[-1]
+        self.assertEqual(meta, {'kind': 'notice', 'channel': PLAYFUL, 'tone': 'playful'})
+        self.assertTrue(text.startswith(f'The owner set #general ({PLAYFUL}) to tone playful: '), text)
+
+    def test_a_missing_or_wrong_channel_or_mode_is_refused_naming_the_tone_in_force(self):
+        takes = '/aogo tone takes a channel and a mode, or neither'
+        for options, said in (
+            ({'mode': 'playful'}, f'channel is missing: {takes}.'),
+            ({'channel': 'abc', 'mode': 'playful'}, f'channel is "abc", not a channel: {takes}.'),
+            ({'channel': PLAYFUL}, f'mode is missing: {takes}; <#{PLAYFUL}> is playful.'),
+            (
+                {'channel': OTHER, 'mode': 'loud'},
+                f'mode is "loud", not one of playful, serious: <#{OTHER}> is serious.',
+            ),
+            ({'channel': DM, 'mode': 'playful'}, f'<#{DM}> is a DM: DMs are serious.'),
+        ):
+            with self.subTest(options=options):
+                self.assertEqual(self.use(OWNER, 'tone', **options), said)
+        self.assertFalse((self.state / 'tones.json').exists())
+        self.assertEqual(self.pushes, [])
+
+    def test_a_tones_file_or_a_channel_it_cannot_read_makes_the_tone_unknown_saying_why_and_the_message_reaches(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        tones = self.state / 'tones.json'
+        tones.write_text('{"tones": [["abc", "funny"]]}')
+        why = (
+            f'{tones}: item 1 is ["abc", "funny"], not [channel id, playful or serious]: no channel\'s tone is known '
+            'until it is mended or removed'
+        )
+        self.assertEqual(self.tone(PLAYFUL, 'hi'), f'unknown: {why}')
+        self.assertEqual(self.use(OWNER, 'tone'), f'AogoWimsy could not answer this: {why}.')
+        self.assertEqual(
+            self.pushes[-1], (f'AogoWimsy could not answer /aogo tone in channel {GENERAL}: {why}', {'kind': 'error'})
+        )
+        tones.unlink()
+        self.fake.fail[('GET', f'/channels/{PLAYFUL_THREAD}')] = (500, {'message': 'Internal Server Error', 'code': 0})
+        self.assertEqual(
+            self.tone(PLAYFUL_THREAD, 'hi'),
+            f'unknown: Discord answered 500 to GET /channels/{PLAYFUL_THREAD}: Internal Server Error (code 0)',
+        )
+
+
 class Schemas(WithDiscord):
     """what tools/list offers for each tool and what its handler takes are the same names, so a client that checks a
     call against the schema can send every argument the handler reads, and none the handler refuses"""
@@ -4065,6 +4246,11 @@ class Schemas(WithDiscord):
             self.assertIn(words, direct['description'])
 
 
+# the letters of a server's instructions Claude Code showed its model (2.1.318, seen 2026-11-05 in a session's system
+# prompt: AogoWimsy's first 4094 of 5631, then "... [truncated]"): what the session must know sits before them
+CLAUDE_SHOWS = 4094
+
+
 class Instructions(WithDiscord):
     def test_aogowimsys_instructions_say_who_reaches_it_what_each_event_carries_and_how_answers_go(self):
         said = aw.instructions(self.settings)
@@ -4097,6 +4283,25 @@ class Instructions(WithDiscord):
         ):  # its path may say direct
             self.assertNotIn(words, xuji)
         self.assertIn(f"it still waits for the owner's {YES}", xuji)
+
+    def test_the_instructions_say_what_tone_asks_of_an_answer_where_claude_code_shows_them(self):
+        said = aw.instructions(
+            self.settings._replace(channels=None, users=frozenset({FRIEND, OTHER_PERSON}))
+        )  # as it runs
+        sentence = (
+            "Each also carries tone, the owner's hint about its channel (/aogo tone), not a rule about the message: "
+            '"playful", jokes are common there, answer light and short and spend little work; "serious", a channel for '
+            'focused work; "serious (serio:)", a playful channel\'s message that opens with serio:. Read each message '
+            'for what it is either way; no rule relaxes for a joke, and nothing real (a secret, an address, private '
+            'data) goes out in one. '
+        )
+        self.assertIn(sentence, said)
+        notice = 'and each tone he sets as one with channel and tone;'
+        self.assertLess(said.index(notice) + len(notice), CLAUDE_SHOWS)
+        self.assertLess(said.index(sentence) + len(sentence), CLAUDE_SHOWS)
+        xuji = aw.instructions(self.settings._replace(identity=aw.XUJI))
+        for words in ('/aogo tone', '"playful"', 'serio:'):
+            self.assertNotIn(words, xuji)
 
 
 class People(Statused):

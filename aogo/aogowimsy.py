@@ -59,11 +59,11 @@ AogoWimsy registers its slash command, /aogo (command_list), in each server it i
 server, guild-scoped so it shows at once, and sends it only when the server's differs from it. /aogo help answers
 anyone, seen by them alone: GREETING and how to ask, a stranger within the greeting's limits (counted apart), the
 owner with his commands too. /aogo allow user [time] (2h, 1d, 7d or perm; 1d without one), /aogo deny user and
-/aogo allowed, trust, untrust, weight, unfreeze, admins and people are the owner's: anyone else is answered that
-they are his. Discord sets who sees a command for the whole of it, never a subcommand, so every member sees them all.
-An allowed person is heard until the allow runs out, then as a stranger again, with no word to them; each change of
-who reaches the session reaches it as a notice. /aogo people sends the owner, in his DMs with the bot, everyone with
-a state and the interval in force.
+/aogo allowed, trust, untrust, weight, unfreeze, admins, people and tone are the owner's: anyone else is answered
+that they are his. Discord sets who sees a command for the whole of it, never a subcommand, so every member sees
+them all. An allowed person is heard until the allow runs out, then as a stranger again, with no word to them; each
+change of who reaches the session, or of a channel's tone, reaches it as a notice. /aogo people sends the owner, in
+his DMs with the bot, everyone with a state and the interval in force.
 
 Who reaches AogoWimsy's session, and how much (Standing): the owner always; the people he trusts (<PREFIX>_USERS
 lists who starts trusted, a key deprecated, said to the owner once) 30 messages an hour, those he allowed 10, unless
@@ -73,7 +73,9 @@ rules each run on its own examples at start) checks what comes in: a rejection (
 than English) never reaches the session, which is told who and the rule, and the server answers it with the rule's
 fixed line, the invisible letters icing their author; a caution reaches it with the rule and why. Each event, and each
 discord_read and discord_wait item, says its author's standing and how an answer may go (about), so the session
-needs no rule in its head. discord_freeze, or a rule, ices a person: ICE_LINES's line pinging the owner (and for a
+needs no rule in its head, and its channel's tone (TONES, or the owner's /aogo tone; a thread its channel's): a hint
+of how much work an answer is worth there, playful or serious, and serious for a playful channel's message that opens
+with the trigger SERIOUS. discord_freeze, or a rule, ices a person: ICE_LINES's line pinging the owner (and for a
 secret or abuse the server's admin role, /aogo admins), their messages only counted for ICE_FIRST, or ICE_AGAIN when
 iced within STRIKES_FOR; never the owner nor a trusted person. XujiWimsy weighs, checks and ices no one.
 Every server of the bot hears a use of it: the first to take the state's lock answers it, at once (Discord takes an
@@ -99,7 +101,8 @@ person's id of each greeting and help of the last GREET_HOURS hours; allowed.jso
 id and name, since and until when); interactions.json, each use of /aogo of the last day and the notice it made, so
 no server answers one twice; people.json, each person's trust, weight, ice and strikes; heard.json, what became of
 each message of a trusted, allowed or let-through person of the last day; direct.json, each direct post of the last
-day; admins.json, each server's admin role; flags.json, the notes to the owner said once. A draft waiting is a
+day; admins.json, each server's admin role; tones.json, each channel's tone the owner set where it differs from
+the one it has without it; flags.json, the notes to the owner said once. A draft waiting is a
 message in the owner's DMs, read again at each look, and stderr says what ran or failed, never what was said nor who
 said it.
 """
@@ -242,17 +245,32 @@ HELP_OWNER = (
     "session, 1d without a time; then their level's again\n"
     '/{command} unfreeze user: ends their ice now; their strikes stay\n'
     "/{command} admins role: this server's admin role, which the ice lines for a secret or abuse ping\n"
-    '/{command} people: who has a state, and how much reached me, in your DMs with me'
+    '/{command} people: who has a state, and how much reached me, in your DMs with me\n'
+    "/{command} tone [channel mode]: a channel's tone for me, playful or serious; alone, every channel's"
 )
 ALLOW_TIMES = {'2h': 2 * 3600, '1d': 24 * 3600, '7d': 7 * 24 * 3600, 'perm': None}  # seconds; None: until denied
 ALLOW_NAMES = {'2h': '2 hours', '1d': '1 day', '7d': '7 days', 'perm': 'permanent'}  # as Discord's picker shows them
 ALLOW_DEFAULT = '1d'  # an allow with no time
-SUBCOMMANDS = ('help', 'allow', 'deny', 'allowed', 'trust', 'untrust', 'weight', 'unfreeze', 'admins', 'people')
+SUBCOMMANDS = ('help', 'allow', 'deny', 'allowed', 'trust', 'untrust', 'weight', 'unfreeze', 'admins', 'people', 'tone')
 OWNERS_ALONE = SUBCOMMANDS[1:]
 # The weights (DraVee, 2026-11-05: "peso temporario: tipo eu poder num periodo de tempo permitir q a pessoa converse
 # mais com vc ou menos"): the messages of a person an hour that reach the session; past them the rest is only counted
 WEIGHTS = {'mute': 0, 'low': 3, 'normal': 10, 'high': 30}
 LEVEL_WEIGHTS = {'trusted': 'high', 'allowed': 'normal'}  # each level's weight when the owner set none
+# The tones (DraVee, 2026-11-06: "Quando eu mandar mensagem no general, geralmente vai ser em tom de brincadeira ...
+# logicamente vai ter hrs que estaria falando serio no canal mas ai um colocaria uma palavra de trigger"; "seria
+# digamos assim menos tokens gastos vc sabendo onde e brincadeira e onde e mais focado"): a hint about a channel each
+# message carries to the session, never a rule about the message. TONES: a channel's when the owner set none with
+# /aogo tone, the server's #general playful; any other channel, and DMs, serious. A thread takes its channel's unless
+# set itself. In a playful channel a message that opens with SERIOUS (any case, its accented e too, after spaces and
+# mentions) is serious
+TONE_MODES = ('playful', 'serious')
+TONES = {'1558959542543589416': 'playful'}
+SERIOUS = re.compile(r'\s*(?:<@[!&]?[0-9]{17,20}>\s*)*s[e\u00e9]rio:', re.IGNORECASE)
+TONE_MEANS = {  # what a tone asks of the session's answers, as the owner's answer and the notice say it
+    'playful': 'jokes are common there, so answers go light and short, spending little work',
+    'serious': 'a channel for focused work',
+}
 OWNED = "'s"  # what heard_words adds for whose message
 HEARD_FOR = 24 * 3600  # seconds what became of a message is kept: the counts of the day
 TICK = 15.0  # seconds between two looks at the people's state for what ran out
@@ -261,7 +279,7 @@ STRIKES_FOR = 7 * 24 * 3600  # seconds a strike counts
 LINE_EVERY = 3600  # seconds before a rule's fixed reply goes to the same person again
 # Discord's numbers: a command of the chat input (CHAT_INPUT), its options' types, an interaction's type, the answer
 # that is a message (CHANNEL_MESSAGE_WITH_SOURCE) and the flag that shows it to its asker alone
-CHAT_INPUT, SUB_COMMAND, STRING_OPTION, USER_OPTION, ROLE_OPTION = 1, 1, 3, 6, 8
+CHAT_INPUT, SUB_COMMAND, STRING_OPTION, USER_OPTION, CHANNEL_OPTION, ROLE_OPTION = 1, 1, 3, 6, 7, 8
 APPLICATION_COMMAND, MESSAGE_ANSWER, EPHEMERAL = 2, 4, 1 << 6
 MISSING_ACCESS = 50001  # Discord's code for a server whose install lacks applications.commands
 HANDLED_FOR = 24 * 3600  # seconds an interaction's answer is kept, so another server of the bot, or a replay, does not
@@ -273,6 +291,7 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
     'allowed': 'no allow is read',
     'interactions': 'no command is answered',
     'people': "no one's trust or weight is read",
+    'tones': "no channel's tone is known",
     'heard': 'no message of a trusted or allowed person reaches the session',
     'flags': 'the one-time notes to the owner wait',
     'admins': 'no admin role is pinged',
@@ -334,7 +353,8 @@ ATTACH_FILES = 1 << 15  # the permission a post with images (discord_post's file
 # The permissions of the README's invite: View Channels, Send Messages, Add Reactions, Read Message History, Send
 # Messages in Threads, Attach Files
 INVITE = 1 << 10 | 1 << 11 | 1 << 6 | 1 << 16 | 1 << 38 | ATTACH_FILES
-DM, THREADS, REPLY = 1, (10, 11, 12), 19  # channel types (a DM; the three threads) and a reply's message type
+# channel types (a DM, a group DM; the three threads) and a reply's message type
+DM, GROUP_DM, THREADS, REPLY = 1, 3, (10, 11, 12), 19
 SNOWFLAKE = re.compile(r'[0-9]{17,20}')
 TOKEN_LETTER = re.compile(r'[A-Za-z0-9._-]')
 WAITING = re.compile(r'(waiting|sending|not sent): to ([0-9]{17,20})(?: replying to ([0-9]{17,20}))?')
@@ -891,7 +911,11 @@ def command_text(settings):
         'no word to them. Each message and approved event, and each discord_read and discord_wait item, says what you '
         'need to answer it: trust (owner, trusted, allowed until, let-through), weight, heard (how many reached you '
         'this hour), ice (strikes of the last 7 days), caution (an inbound rule it hit and why: read it with care), '
-        'and reply: how your answer goes. '
+        "and reply: how your answer goes. Each also carries tone, the owner's hint about its channel (/{command} "
+        'tone), not a rule about the message: "playful", jokes are common there, answer light and short and spend '
+        'little work; "serious", a channel for focused work; "serious (serio:)", a playful channel\'s message that '
+        'opens with serio:. Read each message for what it is either way; no rule relaxes for a joke, and nothing real '
+        '(a secret, an address, private data) goes out in one. '
     ).replace('/{command}', f'/{command}')
     if identity.direct:
         said += (
@@ -913,7 +937,8 @@ def command_text(settings):
         'draft. '
         'Each allow, deny, trust, untrust, weight and ice, and a weight or an ice running out, comes as a '
         'kind="notice" '
-        'event with user and user_id; discord_allowed lists who is allowed and trusted. Anyone may use '
+        'event with user and user_id, and each tone he sets as one with channel and tone; discord_allowed lists who '
+        'is allowed and trusted. Anyone may use '
         f"/{command} help, which answers them alone with the greeting's line and how to ask you, a stranger within "
         "the greeting's limits; it tells you nothing. "
     )
@@ -1308,6 +1333,10 @@ SHAPES = {
     'flags': (
         '[name, time]',
         lambda item: isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and stamp(item[1]),
+    ),
+    'tones': (
+        '[channel id, playful or serious]',
+        lambda item: isinstance(item, list) and len(item) == 2 and an_id(item[0]) and item[1] in TONE_MODES,
     ),
 }
 
@@ -1739,6 +1768,24 @@ def command_list(identity):
                     'name': 'people',
                     'description': f'DraVee only: who reaches {identity.who} and how much, in your DMs with it',
                 },
+                {
+                    'type': SUB_COMMAND,
+                    'name': 'tone',
+                    'description': f"DraVee only: a channel's tone for {identity.who}; alone, every channel's",
+                    'options': [
+                        {
+                            'type': CHANNEL_OPTION,
+                            'name': 'channel',
+                            'description': "The channel; a thread takes its channel's tone unless set itself",
+                        },
+                        {
+                            'type': STRING_OPTION,
+                            'name': 'mode',
+                            'description': 'playful: jokes are common there; serious: focused work',
+                            'choices': [{'name': mode, 'value': mode} for mode in TONE_MODES],
+                        },
+                    ],
+                },
             ],
         }
     ]
@@ -1823,6 +1870,7 @@ class Wimsy:
         identity = settings.identity
         self.store = Store(state) if identity.greeting or identity.command else None
         self.known = {}  # its own user id, its roles and the owner's DM channel, asked once
+        self.kinds = {}  # a channel's id: its type and parent, from the gateway or asked once
         self.told = set()  # the changes of the people's state this server told its session of, with no event of their
         # own: (what, person, when)
         self.approved = set()  # the messages the owner let through while the gateway heard: their ids, in memory only
@@ -2320,8 +2368,8 @@ class Wimsy:
     def about(self, message, kind, now=None, pace=None, where=None):
         """what a message's event and its discord_read item say of its author and of how to answer it, so the session
         needs no rule in its head: trust, and reply; but for the owner, weight and heard (a trusted or allowed
-        person's), and ice; {} for a bot with no command, and for its own. where: its channel as Discord gives it (a
-        message read through REST names no server)"""
+        person's), ice, and its channel's tone; {} for a bot with no command, and for its own. where: its channel as
+        Discord gives it (a message read through REST names no server)"""
         author = message['author']['id']
         if self.store is None or author == self.known.get('me'):
             return {}
@@ -2341,11 +2389,38 @@ class Wimsy:
             weight = f'{standing.weight} ({WEIGHTS[standing.weight]} an hour)'
             said['weight'] = weight + (f' until {utc(standing.until)}' if standing.set and standing.until else '')
             said['heard'] = f'{self.hour_of(author, now)} of {WEIGHTS[standing.weight]} this hour'
+        said['tone'] = self.tone_of(where, message)
         said['reply'] = self.reply_words(self.way(where, message, now, pace), now)
         if standing.level != 'owner':
             ice = f'{standing.strikes} strike{"s" if standing.strikes != 1 else ""} of the last 7 days'
             said['ice'] = ice + (f', iced until {utc(standing.ice["until"])}' if standing.ice else '')
         return said
+
+    def channel_kind(self, where):
+        """a channel's type and parent: as Discord gave it (where), from the gateway's channels, or asked once"""
+        if where.get('type') is not None:
+            return where['type'], where.get('parent_id')
+        if where['id'] not in self.kinds:
+            found = self.discord('GET', f'/channels/{where["id"]}')
+            self.kinds[where['id']] = (found.get('type'), found.get('parent_id'))
+        return self.kinds[where['id']]
+
+    def channel_tone(self, tones, where):
+        """a channel's tone in tones: its own, a thread's channel's, else serious (a DM's: the command sets none)"""
+        if where['id'] in tones:
+            return tones[where['id']]
+        kind, parent = self.channel_kind(where)
+        return tones.get(parent, 'serious') if kind in THREADS else 'serious'
+
+    def tone_of(self, where, message):
+        """a message's tone attribute: its channel's, and in a playful one serious (serio:) when it opens with
+        SERIOUS; unknown and why when the tones file or the channel cannot be read"""
+        try:
+            tone = self.channel_tone(TONES | dict(self.store.cached('tones')), where)
+        except (Refused, OSError, DiscordError) as error:
+            return f'unknown: {error}'
+        text = unicodedata.normalize('NFC', message.get('content') or '')
+        return 'serious (serio:)' if tone == 'playful' and SERIOUS.match(text) else tone
 
     def leaks(self, text):
         """what of a text the outbound rules and the bot's own token keep from going direct: [Hit]"""
@@ -2852,6 +2927,8 @@ class Wimsy:
             return self.admins(event, now)
         if sub == 'people':
             return f'Sent to your DMs with {self.title}.', None, self.people_text(now)
+        if sub == 'tone':
+            return self.tone(event)
         target = values.get('user')
         if not an_id(target):
             return f'user is {shown(target)}, not a member: /{command} {sub} takes one.', None
@@ -2966,6 +3043,58 @@ class Wimsy:
         self.store.save('admins', [item for item in items if item[0] != guild] + [[guild, role]])
         answer = f"<@&{role}> is this server's admin role: the ice lines for a secret or abuse ping it."
         return answer + (f' It was <@&{before}>.' if before and before != role else ''), None
+
+    def tone(self, event):
+        """under the state's lock: a channel's tone the owner sets, kept only where it differs from the tone the
+        channel has without it; with neither channel nor mode, every channel's"""
+        values, command = subcommand(event)[1], self.settings.identity.command
+        channel, mode = values.get('channel'), values.get('mode')
+        items = self.store.load('tones')
+        if channel is None and mode is None:
+            return self.tones_text(dict(items)), None
+        takes = f'/{command} tone takes a channel and a mode, or neither'
+        if not an_id(channel):
+            return f'channel is {"missing" if channel is None else f"{shown(channel)}, not a channel"}: {takes}.', None
+        found = ((event.get('data') or {}).get('resolved') or {}).get('channels', {}).get(channel) or {'id': channel}
+        where = dict(found, id=channel)
+        if where.get('type') in (DM, GROUP_DM):
+            return f'<#{channel}> is a DM: DMs are serious.', None
+        before = self.channel_tone(TONES | dict(items), where)
+        if mode is None:
+            return f'mode is missing: {takes}; <#{channel}> is {before}.', None
+        if mode not in TONE_MODES:
+            return f'mode is {shown(mode)}, not one of {", ".join(TONE_MODES)}: <#{channel}> is {before}.', None
+        if mode == before:
+            return f'<#{channel}> is {mode} already.', None
+        kept = [item for item in items if item[0] != channel]
+        if mode != self.channel_tone(TONES | dict(kept), where):
+            kept.append([channel, mode])
+        self.store.save('tones', kept)
+        trigger = ' A message there that starts with serio: is serious.' if mode == 'playful' else ''
+        answer = f'<#{channel}> is {mode} now: {TONE_MEANS[mode]}; it was {before}.{trigger}'
+        name = f'#{found["name"]}' if found.get('name') else 'channel'
+        text = f'The owner set {name} ({channel}) to tone {mode}: {TONE_MEANS[mode]}; it was {before}.{trigger}'
+        return answer, {'text': text, 'meta': {'kind': 'notice', 'channel': channel, 'tone': mode}}
+
+    def tones_text(self, stored):
+        """every channel's tone as the owner's answer: the playful ones, the ones he set serious, and the rule"""
+        tones = TONES | stored
+
+        def whose(channel):
+            if channel not in stored:
+                return 'the default'
+            return f'yours, {TONES[channel]} by default' if channel in TONES else 'yours'
+
+        def listed(mode):
+            return [f'<#{channel}> ({whose(channel)})' for channel in sorted(tones, key=int) if tones[channel] == mode]
+
+        playful, serious = listed('playful'), listed('serious')
+        said = f'Playful: {", ".join(playful)}.' if playful else 'Playful: no channel.'
+        said += f'\nSerious: {", ".join([*serious, "every other channel, and DMs"])}.'
+        return said + (
+            "\nA thread takes its channel's tone unless set itself. In a playful channel a message that starts with "
+            'serio: is serious.'
+        )
 
     def person_item(self, people, target, name):
         """a person's item of people, made when they have none, its name the one the server shows now"""
@@ -3589,7 +3718,7 @@ class Ear:
         self.tools, self.hub, self.push, self.stop = tools, tools.hub, push, stop
         self.title = tools.title
         self.queue = queue.Queue()
-        self.kinds = {}  # a channel's id: its type and parent, from the gateway or asked once
+        self.kinds = tools.kinds  # a channel's id: its type and parent, from the gateway or asked once
         self.knocked = set()  # strangers whose DM was told
         self.told_uses = set()  # the uses of the command whose notice the session got from this server
         self.started = tools.store.now() if tools.store else 0.0  # what ran out before it is not told
@@ -3743,10 +3872,7 @@ class Ear:
         listed = self.tools.settings.channels
         if listed is None or channel in listed:
             return True
-        if channel not in self.kinds:
-            found = self.tools.discord('GET', f'/channels/{channel}')
-            self.kinds[channel] = (found.get('type'), found.get('parent_id'))
-        kind, parent = self.kinds[channel]
+        kind, parent = self.tools.channel_kind({'id': channel})
         return kind in THREADS and parent in listed
 
     def message(self, message):
