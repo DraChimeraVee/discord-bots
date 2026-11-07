@@ -176,7 +176,7 @@ class Handshake(WithXuji):
     def test_its_tools_are_aogowimsys_in_its_own_names(self):
         xuji, aogo = aw.tool_list(aw.XUJI), aw.tool_list(aw.AOGO)
         text = json.dumps(xuji, ensure_ascii=False)
-        self.assertNotIn('aogo', text.lower().replace(f':{aw.WIMSY}:', ''))  # the owner's emoji alone is named for Aogo
+        self.assertNotIn('aogo', text.lower())  # the owner's emoji too is hers, :wimsyxuji:
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
         # its command's tools (the allows, the ice) and its drawings' upload are Aogo's under /xuji and its own names
@@ -186,6 +186,7 @@ class Handshake(WithXuji):
             .replace('XUJIWIMSY', 'AOGOWIMSY')
             .replace('/xuji ', '/aogo ')
             .replace('wimsyxuji_', 'wimsyaogo_')
+            .replace(':wimsyxuji:', ':wimsyaogo:')
         )
         # discord_post less what each says of its direct posts' pace: Aogo's weighs Claude Code's quota, Xuji's is fixed
         drafts = json.loads(json.dumps(aogo[0]))
@@ -302,9 +303,7 @@ class Reactions(WithXuji):
         plain = [aw.EYES, aw.YES, aw.THUMBS, aw.NO]
         tools = {tool['name']: tool for tool in aw.tool_list(aw.XUJI)}
         for name in ('discord_react', 'discord_unreact'):
-            self.assertEqual(
-                tools[name]['inputSchema']['properties']['emoji']['enum'], [*drawn, *plain, f':{aw.WIMSY}:']
-            )
+            self.assertEqual(tools[name]['inputSchema']['properties']['emoji']['enum'], [*drawn, *plain, ':wimsyxuji:'])
         self.assertEqual(tools['discord_quick']['inputSchema']['properties']['emoji']['enum'], [*drawn, *plain])
         asked = self.fake.say(GENERAL, OWNER, 'can you look at the build?')
         said = self.error('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
@@ -323,6 +322,25 @@ class Reactions(WithXuji):
             said,
         )
         self.assertNotIn('wimsyaogo_', said + json.dumps(tools, ensure_ascii=False))
+
+
+class LetThrough(WithXuji):
+    """the owner lets a stranger's message through to XujiWimsy with his :wimsyxuji:, not Aogo's :wimsyaogo: (DraVee,
+    2026-11-07: "Na Xuji nao ta o :xujiwimsy pra liberar a mensagem")"""
+
+    def test_only_the_wimsyxuji_reaction_lets_a_strangers_message_through(self):
+        self.assertEqual((aw.XUJI.wimsy, aw.AOGO.wimsy), ('wimsyxuji', 'wimsyaogo'))
+        mine = self.fake.say(GENERAL, base.BOT, 'a post of mine')
+        aogos = self.fake.say(GENERAL, base.STRANGER, "with aogo's emoji", reply_to=mine)
+        hers = self.fake.say(GENERAL, base.STRANGER, 'with hers', reply_to=mine)
+        self.fake.react(aogos, 'wimsyaogo:600000000000000001', OWNER)
+        self.fake.react(hers, 'wimsyxuji:600000000000000003', OWNER)
+        got = self.tool('discord_read', channel=GENERAL)
+        self.assertEqual([(m['id'], m['approved']) for m in got['messages']], [(mine, False), (hers, True)])
+        self.assertNotIn("with aogo's emoji", json.dumps(got))
+        said = aw.instructions(self.settings) + json.dumps(aw.tool_list(aw.XUJI), ensure_ascii=False)
+        self.assertIn(':wimsyxuji:', said)
+        self.assertNotIn(':wimsyaogo:', said)
 
 
 class Posting(WithXuji):
@@ -524,8 +542,9 @@ class Monitors(WithXuji):
             lines.readline(),
             f'dm: Stranger ({STRANGER}) wrote to XujiWimsy in DMs; nothing of what they wrote reaches the session\n',
         )
-        self.fake.react(number, base.WIMSY, OWNER)
-        name, _, emoji_id = base.WIMSY.partition(':')
+        hers = 'wimsyxuji:600000000000000003'  # the owner's emoji for XujiWimsy, as a reaction's path names it
+        self.fake.react(number, hers, OWNER)
+        name, _, emoji_id = hers.partition(':')
         event = {'user_id': OWNER, 'channel_id': GENERAL, 'message_id': number, 'guild_id': GUILD}
         self.ear.hear('MESSAGE_REACTION_ADD', dict(event, emoji={'id': emoji_id, 'name': name}))
         self.assertEqual(
