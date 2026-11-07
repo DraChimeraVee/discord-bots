@@ -187,22 +187,19 @@ class Handshake(WithXuji):
             .replace('/xuji ', '/aogo ')
             .replace('wimsyxuji_', 'wimsyaogo_')
         )
-        # discord_post less what each says of direct posts, which Xuji makes none of: its own direct says so
+        # discord_post less what each says of its direct posts' pace: Aogo's weighs Claude Code's quota, Xuji's is fixed
         drafts = json.loads(json.dumps(aogo[0]))
         self.assertEqual(drafts['name'], 'discord_post')
         drafts['description'] = drafts['description'].removesuffix(aw.direct_text(aw.AOGO))
-        del drafts['inputSchema']['properties']['direct']
-        del as_aogo[0]['inputSchema']['properties']['direct']
+        mine = xuji[0]['description']
+        self.assertTrue(mine.endswith(aw.direct_text(aw.XUJI)))
+        as_aogo[0]['description'] = as_aogo[0]['description'][: len(drafts['description'])]
         self.assertEqual(
             [tool for tool in as_aogo if tool['name'] not in reacting],
             [drafts] + [tool for tool in aogo[1:] if tool['name'] not in (*reacting, *aogos)],
         )
-        said = xuji[0]['inputSchema']['properties']['direct']['description']
-        drafts_only = (
-            "XujiWimsy posts drafts only, its client's quota not being Claude Code's: true is an error saying so"
-        )
-        self.assertEqual(said, drafts_only)
-        self.assertNotIn('direct post', text)
+        self.assertIn('XUJIWIMSY_DIRECT_MINUTES (30 by default), fixed, as its client reports no quota', mine)
+        self.assertNotIn('doubled for the quota', mine)
         self.assertEqual([tool['name'] for tool in xuji], [name for name in aw.TOOL_NAMES if name not in aogos])
         for name in aogos:
             call = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': name}}
@@ -232,18 +229,16 @@ class Handshake(WithXuji):
 
 
 class Drafts(WithXuji):
-    def test_a_direct_post_is_refused_naming_why_and_no_direct_key_is_taken(self):
-        said = self.error('discord_post', channel=GENERAL, text='hello', direct=True)
+    def test_its_direct_posts_go_at_a_fixed_interval_from_its_own_keys(self):
+        self.assertEqual(aw.XUJI.direct_keys, ('XUJIWIMSY_DIRECT', 'XUJIWIMSY_DIRECT_MINUTES'))
+        got = self.tool('discord_post', channel=GENERAL, text='hello', direct=True)
+        self.assertEqual((got['status'], got['direct']), ('sent', 'interval'))
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'hello')
+        said = self.error('discord_post', channel=GENERAL, text='again', direct=True)
+        self.assertIn('XUJIWIMSY_DIRECT_MINUTES 30, fixed: its client reports no quota', said)  # the next waits 30 min
         self.assertEqual(
-            said,
-            'direct is true, and XujiWimsy posts drafts only: the quota and context its direct posts would follow are '
-            "Claude Code's: post it without direct, as a draft the owner sees",
+            self.tool('discord_post', channel=GENERAL, text='again', direct=False, wait=0)['status'], 'waiting'
         )
-        self.assertEqual(self.fake.requests, [])
-        self.assertEqual(
-            self.tool('discord_post', channel=GENERAL, text='hello', direct=False, wait=0)['status'], 'waiting'
-        )
-        self.assertEqual(aw.XUJI.direct_keys, ())
 
 
 class Clients(WithXuji):

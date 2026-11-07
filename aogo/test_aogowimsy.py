@@ -4239,7 +4239,7 @@ class Schemas(WithDiscord):
         self.assertEqual(self.fake.requests, [])  # each refused before Discord heard of it
         for bot, words in (
             (aw.AOGO, 'a refusal is an error naming the rule'),
-            (aw.XUJI, 'XujiWimsy posts drafts only'),
+            (aw.XUJI, 'a refusal is an error naming the rule'),  # its direct posts too, at a fixed interval
         ):
             direct = aw.tool_list(bot)[0]['inputSchema']['properties']['direct']
             self.assertEqual((direct['type'], direct['default']), ('boolean', False))
@@ -4274,11 +4274,12 @@ class Instructions(WithDiscord):
             self.assertIn(words, said)
         self.assertNotIn('a text goes through discord_post and the owner', said)
         xuji = aw.instructions(self.settings._replace(identity=aw.XUJI))
-        for words in ('direct post', 'direct true', 'pre-harness'):  # its path may say direct
+        for words in ('pre-harness', "Claude Code's quota"):  # its pace is fixed: Grok Build reports no quota
             self.assertNotIn(words, xuji)
+        self.assertIn('; a direct post, below, goes at once', xuji)
+        self.assertIn("or with direct true it goes at once where the event's reply lets it", xuji)
         for words in ('/xuji sets who reaches you (trust, allow, weight, tone)', 'discord_freeze', 'discord_allowed'):
             self.assertIn(words, xuji)
-        self.assertIn(f"it still waits for the owner's {YES}", xuji)
 
     def test_the_instructions_say_what_tone_asks_of_an_answer_where_claude_code_shows_them(self):
         said = aw.instructions(
