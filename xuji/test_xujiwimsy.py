@@ -229,6 +229,12 @@ class Handshake(WithXuji):
 
 
 class Drafts(WithXuji):
+    def test_its_direct_posts_pass_aogowimsys_pre_harness_first(self):
+        said = self.error('discord_post', channel=GENERAL, text='see /home/dravee/WorkDir/notes.txt', direct=True)
+        self.assertIn('the pre-harness keeps this text from going direct: machine-path', said)
+        self.assertIn('post it without direct, as a draft the owner sees', said)
+        self.assertEqual(self.fake.requests, [])  # nothing reached Discord
+
     def test_its_direct_posts_go_at_a_fixed_interval_from_its_own_keys(self):
         self.assertEqual(aw.XUJI.direct_keys, ('XUJIWIMSY_DIRECT', 'XUJIWIMSY_DIRECT_MINUTES'))
         got = self.tool('discord_post', channel=GENERAL, text='hello', direct=True)
