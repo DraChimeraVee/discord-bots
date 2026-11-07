@@ -152,6 +152,7 @@ class Identity(NamedTuple):
     command: str | None = None  # its slash command's name (COMMANDS), registered in each server it is in; None: none
     drawn: tuple = ()  # its custom emojis, one for each of MEANINGS (EMOJI_FOLDER/<name>.png); (): unicode alone
     program: str = 'aogo/aogowimsy.py'  # its program, from the repository's root: the monitor runs it --listen
+    wimsy: str = 'wimsyaogo'  # the owner's custom emoji whose reaction lets a stranger's message through to it
     direct: bool = False  # True: it may post at once, within its rules, the quota and context of Claude Code's
 
     def key(self, name):
@@ -200,7 +201,7 @@ class Identity(NamedTuple):
     @property
     def reactions(self):
         """what discord_react puts: the quick ones, and for a bot drawn as Aogo the owner's WIMSY, named for Aogo"""
-        return (*self.quick, f':{WIMSY}:') if self.drawn else self.quick
+        return (*self.quick, f':{self.wimsy}:') if self.drawn else self.quick
 
 
 # What a stranger who calls the bot gets at once, with no draft and no owner's check mark (DraVee, 2026-11-02:
@@ -301,7 +302,8 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
 YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
 # The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
 # emoji"): his reaction with it, and only his, lets one stranger's message addressed to the bot reach the session.
-# Matched by its name; a constant, not a setting.
+# Matched by its name; each bot has its own (Identity.wimsy: XujiWimsy's is wimsyxuji, DraVee 2026-11-07), and
+# this is AogoWimsy's.
 WIMSY = 'wimsyaogo'
 # What the bot answers with, at once and with no draft (DraVee, 2026-11-02: "implementa reacoes, assim vc meio q
 # pode responder mais rapidamente"; of the drawn ones: "vc pode ate usar como mensagem rapida tambem"): a reaction
@@ -333,6 +335,7 @@ XUJI = Identity(
     command='xuji',
     direct=True,
     drawn=('wimsyxuji_eyes', 'wimsyxuji_done', 'wimsyxuji_thumbsup', 'wimsyxuji_no'),
+    wimsy='wimsyxuji',
     program='xuji/xujiwimsy.py',
 )
 ROOT = Path(__file__).resolve().parent.parent  # the repository's root, which Identity.program starts from
@@ -883,6 +886,7 @@ def seen_and_done(identity):
 
 def greeting_text(settings):
     """the greeting in words, for the session: what a stranger who calls the bot gets, and its limits in effect"""
+    wimsy = settings.identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
     me, identity = settings.identity.title, settings.identity
     if not identity.greeting:
         return ''
@@ -895,7 +899,7 @@ def greeting_text(settings):
         f'with no draft and no {YES}, a reply from the server itself that pings the owner alone: '
         f'"{identity.greeting.format(owner=settings.owner)}". Once a person each {settings.greet_hours} h, and '
         f'{settings.greet_per_hour} an hour at most, everyone together; past that the call is only counted. You are '
-        f"told nothing of the call; the owner's :{WIMSY}: on it still lets it through to you, to answer with a draft. "
+        f"told nothing of the call; the owner's :{wimsy}: on it still lets it through to you, to answer with a draft. "
     )
 
 
@@ -956,6 +960,7 @@ def command_text(settings):
 
 def instructions(settings):
     """what the server tells the session about itself: how Discord reaches it, pushed or waited for"""
+    wimsy = settings.identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
     me = settings.identity.title
     command = settings.identity.command
     allowed = f', of those the owner allowed with /{command} allow' if command else ''
@@ -971,12 +976,12 @@ def instructions(settings):
         + (
             # kept short: Grok Build shows its model the first GROK_SHOWS bytes of these
             f"Of what it reads, only the owner's messages, its own and those of whom he trusts or allowed with "
-            f"/{command} reach you; another's only when the owner let it through (his :{WIMSY}: on it, or his reply "
+            f"/{command} reach you; another's only when the owner let it through (his :{wimsy}: on it, or his reply "
             f'mentioning {me}). '
             if command and not settings.identity.claude
             else f"Of what it reads, only the owner's messages, those of {users}{allowed} and its own reach you; the "
             f'others are counted, but for a message the owner let through: one addressed to {me} (a mention, or a '
-            f'reply to one of its messages) that he put his :{WIMSY}: reaction on, or any he replied to while '
+            f'reply to one of its messages) that he put his :{wimsy}: reaction on, or any he replied to while '
             f'mentioning {me}. '
         )
         + greeting_text(settings)
@@ -1040,6 +1045,7 @@ def cut_by_grok(settings, text):
 
 def reacting_text(identity):
     """the reactions and quick replies in words, for the session: which, and when"""
+    wimsy = identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
     me, (seen, done) = identity.title, seen_and_done(identity)
     if identity.drawn and not identity.claude:  # XujiWimsy's: Grok Build shows its model the first GROK_SHOWS bytes
         eyes, done, thumbs, no = (f':{name}:' for name in identity.drawn)  # in MEANINGS' order
@@ -1058,9 +1064,9 @@ def reacting_text(identity):
     return (
         'To say you saw a message or finished what it asked, react to it with discord_react instead of posting, the '
         f"server's emoji first, its unicode one only while that is not uploaded: {reactions_text(identity)}; and "
-        f":{WIMSY}:, the owner's emoji. A reaction goes out at once, with no draft, and only these; put {seen} when "
+        f":{wimsy}:, the owner's emoji. A reaction goes out at once, with no draft, and only these; put {seen} when "
         f"you start on a message and, once done, take it off with discord_unreact and put {done}. {me}'s own "
-        f":{WIMSY}: lets nothing through: only the owner's does. To answer a message with one of those emojis alone, "
+        f":{wimsy}: lets nothing through: only the owner's does. To answer a message with one of those emojis alone, "
         'a quick reply, use discord_quick: it posts at once, with no draft, and takes no text; a text goes through '
         'discord_post. '
     )
@@ -2606,12 +2612,13 @@ class Wimsy:
 
     def let_through(self, channel, message, me):
         """whether a stranger's message is addressed to the bot and carries the owner's WIMSY reaction"""
+        wimsy = self.settings.identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
         if not addressed(message, me, self.roles()):
             return False
         for reaction in message.get('reactions') or []:
             emoji = reaction.get('emoji') or {}
-            if emoji.get('name') == WIMSY and emoji.get('id'):
-                return self.settings.owner in self.reactors(channel, message['id'], f'{WIMSY}:{emoji["id"]}')
+            if emoji.get('name') == wimsy and emoji.get('id'):
+                return self.settings.owner in self.reactors(channel, message['id'], f'{wimsy}:{emoji["id"]}')
         return False
 
     def edit(self, dm, draft, card):
@@ -2696,6 +2703,7 @@ class Wimsy:
         """Refused unless discord_read gives the message: the owner's, a listed user's, the bot's own, or one the owner
         let through (his WIMSY reaction, or his reply mentioning the bot among the PAGE messages after it); the
         refusal names no one"""
+        wimsy = self.settings.identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
         me = self.me()
         hit = self.rejects(message)
         if hit:
@@ -2717,7 +2725,7 @@ class Wimsy:
             )
         raise Refused(
             f"message {message['id']} is not one {self.title} gives: neither the owner's ({self.settings.owner}), "
-            f'{self.heard_words(OWNED)} nor its own, and the owner has not let it through (his :{WIMSY}: reaction, or '
+            f'{self.heard_words(OWNED)} nor its own, and the owner has not let it through (his :{wimsy}: reaction, or '
             'his '
             f'reply to it mentioning {self.title})'
         )
@@ -4084,6 +4092,9 @@ class Ear:
             self.told('notice')
 
     def reaction(self, event):
+        wimsy = (
+            self.tools.settings.identity.wimsy
+        )  # the owner's emoji that lets a stranger's message through to this bot
         emoji = event.get('emoji') or {}
         if event.get('user_id') != self.tools.settings.owner:
             return
@@ -4091,7 +4102,7 @@ class Ear:
             if event['channel_id'] == self.tools.dm() and emoji.get('id') is None and emoji.get('name') in (YES, NO):
                 self.drafted(event['message_id'])
             return
-        if emoji.get('name') != WIMSY:
+        if emoji.get('name') != wimsy:
             return
         channel, number = event['channel_id'], event['message_id']
         if number in self.tools.approved:
@@ -4232,6 +4243,7 @@ def where_text(identity):
 
 def tool_list(identity):
     """the tools as tools/list gives them, in the identity's names: discord_allowed for a bot with a command alone"""
+    wimsy = identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
     me, channels, where = identity.title, identity.key('CHANNELS'), where_text(identity)
     allowed = {
         'name': 'discord_allowed',
@@ -4266,10 +4278,10 @@ def tool_list(identity):
     seen, done = seen_and_done(identity)
     if identity.drawn:
         first = ' The custom one first: its unicode one only while the server has not got it (that error names it).'
-        taken = f"{reactions_text(identity)}; and :{WIMSY}:, the owner's emoji.{first[:-1]}"
+        taken = f"{reactions_text(identity)}; and :{wimsy}:, the owner's emoji.{first[:-1]}"
         custom, own = (
             " A custom one is the server's emoji of its name.",
-            f" {me}'s own :{WIMSY}: lets nothing through: only the owner's does.",
+            f" {me}'s own :{wimsy}: lets nothing through: only the owner's does.",
         )
     else:
         first = custom = own = ''
@@ -4341,7 +4353,7 @@ def tool_list(identity):
                 'oldest first. Returns JSON {"channel", "messages": [' + MESSAGE + '], "left_out", "after"}. Only the '
                 f"owner's messages, the listed users' and {me}'s own are given, or only those of the authors `from` "
                 f"names; and, without `from`, a stranger's message the owner let through: addressed to {me} with "
-                f'his :{WIMSY}: reaction on it, or one he replied to mentioning {me}. left_out counts the others, '
+                f'his :{wimsy}: reaction on it, or one he replied to mentioning {me}. left_out counts the others, '
                 'and nothing else of them is given. "after" is the newest id read, to read on from. ' + where
             ),
             'inputSchema': {
