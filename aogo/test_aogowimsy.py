@@ -1610,6 +1610,17 @@ class React(WithDiscord):
         self.assertIn('a quick reply, use discord_quick: it posts at once, with no draft, and takes no text', said)
 
 
+class Quote(unittest.TestCase):
+    """DraVee, 2026-11-07, after XujiWimsy quoted Aogo's words as a block: "we need to be as reference or rule, to
+    quote people direct": a quote is a mention, in both bots' discord_post"""
+
+    def test_both_bots_say_a_quote_is_a_mention_of_the_person(self):
+        for bot in (aw.AOGO, aw.XUJI):
+            said = aw.tool_list(bot)[0]['description']
+            self.assertIn('To quote someone, as the owner asks it, mention them in the text, <@their id>', said)
+            self.assertIn('a block of their words is not a quote', said)
+
+
 class Drawn(WithDiscord):
     """the server's custom emojis drawn for the bot's answers: found by name, a missing one named with its unicode"""
 

@@ -4286,7 +4286,9 @@ def tool_list(identity):
                 'Waits up to `wait` seconds for the answer, then returns JSON: {"status": "sent", "link", "message", '
                 '"channel", "draft"} when approved; {"status": "not sent", "channel", "draft"} when refused; {"status": '
                 '"waiting", "draft", "link", "waited"} when not answered yet: call discord_post_status with that draft '
-                'to wait on. An error names the value refused and what is taken.'
+                'to wait on. An error names the value refused and what is taken. To quote someone, as the owner asks it, '
+                'mention them in the text, <@their id>, replying to their message when there is one: a block of their '
+                'words is not a quote (DraVee, 2026-11-07).'
             ),
             'inputSchema': {
                 'type': 'object',
