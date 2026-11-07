@@ -179,10 +179,13 @@ class Handshake(WithXuji):
         self.assertNotIn('aogo', text.lower().replace(f':{aw.WIMSY}:', ''))  # the owner's emoji alone is named for Aogo
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
-        # Aogo's drawings', which Xuji has not; its command's tools (the allows, the ice) are Aogo's under /xuji
-        aogos = ('discord_emoji_upload',)
+        # its command's tools (the allows, the ice) and its drawings' upload are Aogo's under /xuji and its own names
+        aogos = ()
         as_aogo = json.loads(
-            text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY').replace('/xuji ', '/aogo ')
+            text.replace('XujiWimsy', 'AogoWimsy')
+            .replace('XUJIWIMSY', 'AOGOWIMSY')
+            .replace('/xuji ', '/aogo ')
+            .replace('wimsyxuji_', 'wimsyaogo_')
         )
         # discord_post less what each says of direct posts, which Xuji makes none of: its own direct says so
         drafts = json.loads(json.dumps(aogo[0]))
@@ -289,30 +292,35 @@ class Clients(WithXuji):
 
 
 class Reactions(WithXuji):
-    """XujiWimsy answers with the unicode emojis alone: the drawn ones are Aogo's face"""
+    """XujiWimsy answers with its own drawn emojis (wimsy-dist's emoji/wimsyxuji_*), the unicode ones while a server
+    lacks them, as AogoWimsy does with Aogo's"""
 
-    def test_it_reacts_and_quick_replies_with_the_unicode_ones_alone(self):
+    def test_it_reacts_with_its_drawn_emojis_and_their_unicode_ones(self):
+        drawn = [f':{name}:' for name in aw.XUJI.drawn]
+        self.assertEqual(drawn, [':wimsyxuji_eyes:', ':wimsyxuji_done:', ':wimsyxuji_thumbsup:', ':wimsyxuji_no:'])
         plain = [aw.EYES, aw.YES, aw.THUMBS, aw.NO]
         tools = {tool['name']: tool for tool in aw.tool_list(aw.XUJI)}
-        for name in ('discord_react', 'discord_unreact', 'discord_quick'):
-            self.assertEqual(tools[name]['inputSchema']['properties']['emoji']['enum'], plain)
+        for name in ('discord_react', 'discord_unreact'):
+            self.assertEqual(
+                tools[name]['inputSchema']['properties']['emoji']['enum'], [*drawn, *plain, f':{aw.WIMSY}:']
+            )
+        self.assertEqual(tools['discord_quick']['inputSchema']['properties']['emoji']['enum'], [*drawn, *plain])
         asked = self.fake.say(GENERAL, OWNER, 'can you look at the build?')
-        for emoji in (':wimsyaogo_eyes:', f':{aw.WIMSY}:'):
-            said = self.error('discord_react', channel=GENERAL, message=asked, emoji=emoji)
-            self.assertIn(f'emoji is "{emoji}", not one XujiWimsy reacts with: it takes {", ".join(plain)}', said)
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=':wimsyaogo_eyes:')
+        self.assertIn('emoji is ":wimsyaogo_eyes:", not one XujiWimsy reacts with', said)  # Aogo's face is not hers
+        said = self.error('discord_react', channel=GENERAL, message=asked, emoji=':wimsyxuji_eyes:')
+        self.assertIn('no server XujiWimsy is in has an emoji named wimsyxuji_eyes', said)
+        self.assertIn(f'(discord_emoji_upload uploads it); {aw.EYES} says the same', said)
         self.assertEqual(self.tool('discord_react', channel=GENERAL, message=asked, emoji=aw.EYES)['status'], 'reacted')
-        self.assertIn(
-            'not one XujiWimsy posts alone',
-            self.error('discord_quick', channel=GENERAL, reply_to=asked, emoji=':wimsyaogo_done:'),
-        )
         self.assertEqual(self.tool('discord_quick', channel=GENERAL, reply_to=asked, emoji=aw.YES)['status'], 'posted')
         self.assertEqual(self.fake.last(GENERAL)['content'], aw.YES)
-        self.assertEqual(self.fake.posts('GET', f'/guilds/{GUILD}/emojis'), [])  # no custom emoji looked for
         said = aw.instructions(self.settings)
-        listed = f'{aw.EYES} (seen, on it); {aw.YES} (done); {aw.THUMBS} (agreed); {aw.NO} (cannot)'
-        self.assertIn(f'react to it with discord_react rather than post: {listed}; {aw.EYES} when you start', said)
-        self.assertIn(f'then discord_unreact it and put {aw.YES} when done. A reaction goes out at once', said)
-        self.assertIn(f'only these: {listed}. Use one instead of a post', tools['discord_react']['description'])
+        self.assertIn(
+            'React rather than post, at once and with no draft: discord_react :wimsyxuji_eyes: when you start on a '
+            'message, then discord_unreact it and put :wimsyxuji_done: when done; :wimsyxuji_thumbsup: agreed, '
+            ':wimsyxuji_no: cannot, each its unicode one while the server lacks it.',
+            said,
+        )
         self.assertNotIn('wimsyaogo_', said + json.dumps(tools, ensure_ascii=False))
 
 

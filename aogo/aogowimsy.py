@@ -331,6 +331,7 @@ XUJI = Identity(
     '~/.config/xujiwimsy/xujiwimsy.env',
     claude=False,
     command='xuji',
+    drawn=('wimsyxuji_eyes', 'wimsyxuji_done', 'wimsyxuji_thumbsup', 'wimsyxuji_no'),
     program='xuji/xujiwimsy.py',
 )
 ROOT = Path(__file__).resolve().parent.parent  # the repository's root, which Identity.program starts from
@@ -1039,7 +1040,15 @@ def cut_by_grok(settings, text):
 def reacting_text(identity):
     """the reactions and quick replies in words, for the session: which, and when"""
     me, (seen, done) = identity.title, seen_and_done(identity)
-    if not identity.drawn:  # XujiWimsy's, kept short: Grok Build shows its model the first GROK_SHOWS bytes
+    if identity.drawn and not identity.claude:  # XujiWimsy's: Grok Build shows its model the first GROK_SHOWS bytes
+        eyes, done, thumbs, no = (f':{name}:' for name in identity.drawn)  # in MEANINGS' order
+        return (
+            f'React rather than post, at once and with no draft: discord_react {eyes} when you start on a message, '
+            f'then discord_unreact it and put {done} when done; {thumbs} agreed, {no} cannot, each its unicode one '
+            f'while the server lacks it. discord_quick replies with one alone; a text goes through discord_post and the '
+            f"owner's {YES}. "
+        )
+    if not identity.drawn:  # kept short: Grok Build shows its model the first GROK_SHOWS bytes
         return (
             f'To say you saw a message or did what it asked, react to it with discord_react rather than post: '
             f'{reactions_text(identity)}; {seen} when you start, then discord_unreact it and put {done} when done. A '
