@@ -18,7 +18,7 @@ Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
 | `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through eleven MCP tools: post (once its owner approves the draft, or at once where the rules he sets let it), the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), upload the server's custom emojis it answers with, list who its owner allowed, and ice someone who tried what its harness refuses. A slash command, `/aogo`: help for anyone, and its owner's trust, allow, weight and ice for people and tone for channels. A pre-harness of rules checks what comes in and what goes out direct. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, each event saying how much its author is trusted, how an answer may go and its channel's tone, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, those he trusts or allowed (as much as their weight lets) and its own reach the session, and a stranger's only once its owner lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message; Claude Code's status line (the quota, the context, this session's agents) | to Discord, the drafts (to its owner's DMs), the posts approved, the direct posts, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it, the pre-harness's and the ice's fixed lines, `/aogo` and its answers (seen by their asker alone), `/aogo people` (to its owner's DMs); to the session, the messages it may read and the ones addressed to it |
-| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and eight of its tools, with Xuji's bot and settings, its reactions and quick replies the unicode emojis alone. It pushes what is addressed to Xuji, its owner's answers to its drafts and the gateway's news to the session's monitor, a line each, as Grok Build takes no push from an MCP server | as AogoWimsy | as AogoWimsy, but to the session's monitor (a local socket) in place of a claude/channel, no drawn emoji, and it greets no one and has no command |
+| `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and ten of its tools, `/xuji`, with Xuji's bot and settings, its reactions and quick replies the unicode emojis alone. It pushes what is addressed to Xuji, its owner's answers to its drafts and the gateway's news to the session's monitor, a line each, as Grok Build takes no push from an MCP server | as AogoWimsy | as AogoWimsy, but to the session's monitor (a local socket) in place of a claude/channel, no drawn emoji, and it greets no one and has no command |
 
 No bot keeps a message or logs what was said, and none pings anyone but AogoWimsy's greeting and its ice lines, which
 ping its owner (an ice line for a secret or abuse, the server's admin role too).
@@ -256,13 +256,15 @@ instructions to the session say which channels and greeting limits are in effect
 
 Xuji, the Grok Build session, on Discord as a bot user of its own. `xuji/xujiwimsy.py` runs `aogo/aogowimsy.py` with
 Xuji's identity (the table `IDENTITIES` there): its bot, its env file and keys, its name in every text. Everything else
-is AogoWimsy's, a fix to one a fix to both: the tools above but `discord_emoji_upload`, `discord_allowed` and
-`discord_freeze`, with the same arguments, defaults and answers, and no direct post (its client's quota is not Claude
-Code's: `direct` true is an error saying so); the owner's check mark as the only way out; the owner, the listed users
-and the strangers he lets through (his `:wimsyaogo:` too), with no trust, weight, ice or pre-harness; nothing stored,
-and stderr never saying what was said. The drawn
+is AogoWimsy's, a fix to one a fix to both: the tools above but `discord_emoji_upload`, with the same arguments,
+defaults and answers, and no direct post (its client's quota is not Claude Code's: `direct` true is an error saying
+so); the owner's check mark as the only way out. Its command is `/xuji`, AogoWimsy's `/aogo` in its own name: the
+owner trusts, allows, weighs and ices people and sets a channel's tone, its state in `<XDG_STATE_HOME or
+~/.local/state>/xujiwimsy/`, and the pre-harness checks what reaches it; `XUJIWIMSY_USERS` lists who starts trusted.
+Its instructions say this shorter than AogoWimsy's, as Grok Build shows its model their first 2048 bytes. The drawn
 emojis are Aogo's face, so `discord_react`, `discord_unreact` and `discord_quick` take the unicode eyes, check mark,
-thumbs up and cross alone, and it uploads none. It greets no one, takes no `GREET` key and has no command.
+thumbs up and cross alone, and it uploads none. It greets no one and takes no `GREET` key: `/xuji help` says who it is
+in a line of its own.
 
 It serves any client but Claude Code: an `initialize` from `claude-code` gets an error naming it and AogoWimsy. Grok
 Build takes no push from an MCP server into its model: a server's log messages and resource updates reach neither the

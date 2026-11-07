@@ -4,8 +4,8 @@
     xujiwimsy.py [--env FILE]       FILE: ~/.config/xujiwimsy/xujiwimsy.env when not given; mode 600 or stricter
     xujiwimsy.py --listen           what this session's server pushes, a line each: the session's monitor runs it
 
-aogo/aogowimsy.py with Xuji's identity: its bot, its env file and XUJIWIMSY_ keys, eight of its tools (the unicode
-emojis alone), no claude/channel (it pushes to the session's monitor, which runs --listen), and any client but Claude
+aogo/aogowimsy.py with Xuji's identity: its bot, its env file and XUJIWIMSY_ keys, ten of its tools (the unicode
+emojis alone), /xuji, no claude/channel (it pushes to the session's monitor, which runs --listen), and any client but Claude
 Code. A fix there is a fix here.
 """
 

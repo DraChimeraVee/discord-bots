@@ -86,8 +86,9 @@ class EnvFile(unittest.TestCase):
 
     def test_its_values_are_checked_as_aogowimsys_naming_its_keys(self):
         self.assertIn('XUJIWIMSY_TOKEN is empty, and XujiWimsy needs it', self.refused(GOOD_ENV.replace(TOKEN, '')))
-        said = self.refused(GOOD_ENV.replace(f'XUJIWIMSY_USERS = {FRIEND}', ''))
-        self.assertIn('XUJIWIMSY_USERS is missing, and XujiWimsy needs it', said)
+        # XUJIWIMSY_USERS lists who starts trusted, as AOGOWIMSY_USERS does: a file without it is read, trusting no one
+        path = base.write_env(self.folder.name, GOOD_ENV.replace(f'XUJIWIMSY_USERS = {FRIEND}', ''), name='bare.env')
+        self.assertEqual(aw.read_settings(path, aw.XUJI).users, frozenset())
         said = self.refused(GOOD_ENV.replace(f'{GENERAL}, {HELP}', ''))
         self.assertIn('XUJIWIMSY_CHANNELS is empty: list id,id, or take the line out', said)
         said = self.refused(GOOD_ENV.replace(f'_OWNER={OWNER}', '_OWNER=12345'))
@@ -138,14 +139,17 @@ class Handshake(WithXuji):
         self.assertTrue(
             said.startswith(f'XujiWimsy is Xuji on Discord. Every post is a draft its owner (Discord user {OWNER})')
         )
-        self.assertIn(f"only the owner's messages, those of users {FRIEND} and its own reach you", said)
+        self.assertIn(
+            "only the owner's messages, its own and those of whom he trusts or allowed with /xuji reach you", said
+        )
+        self.assertIn('/xuji sets who reaches you (trust, allow, weight, tone), each change a kind="notice"', said)
         program = HERE / 'xujiwimsy.py'
         self.assertIn(
             "Discord reaches you through a monitor: at the session's start, run the monitor tool, persistent, "
             f'description "XujiWimsy", command `python3 {program} --listen`; each line it prints is an event for you',
             said,
         )
-        self.assertIn('If it stops, start it again. Without it, discord_wait hears a channel, and the next tool', said)
+        self.assertIn('If it stops, start it again; without it, discord_wait hears a channel.', said)
         self.assertNotIn('<channel>', said)
         self.assertNotIn('Aogo', said)
         self.assertIn('<channel> events', aw.instructions(self.settings._replace(identity=aw.AOGO)))
@@ -175,9 +179,11 @@ class Handshake(WithXuji):
         self.assertNotIn('aogo', text.lower().replace(f':{aw.WIMSY}:', ''))  # the owner's emoji alone is named for Aogo
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
-        # Aogo's drawings' and its command's (the allows, the ice, which its state holds), which Xuji has not
-        aogos = ('discord_emoji_upload', 'discord_allowed', 'discord_freeze')
-        as_aogo = json.loads(text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY'))
+        # Aogo's drawings', which Xuji has not; its command's tools (the allows, the ice) are Aogo's under /xuji
+        aogos = ('discord_emoji_upload',)
+        as_aogo = json.loads(
+            text.replace('XujiWimsy', 'AogoWimsy').replace('XUJIWIMSY', 'AOGOWIMSY').replace('/xuji ', '/aogo ')
+        )
         # discord_post less what each says of direct posts, which Xuji makes none of: its own direct says so
         drafts = json.loads(json.dumps(aogo[0]))
         self.assertEqual(drafts['name'], 'discord_post')
@@ -362,20 +368,31 @@ class News(WithXuji):
             number = self.fake.say(GENERAL, STRANGER, 'who is this?', **extra)
             self.ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, number))
         self.assertEqual(self.fake.posts('POST', f'/channels/{GENERAL}/messages'), [])
-        self.assertIsNone(self.bot.store)
-        self.assertFalse(self.state.parent.joinpath('xujiwimsy').exists())
+        self.assertEqual(self.bot.allowed(), {})  # its store holds the owner's allows, and a call adds none
         self.assertNotIn('greet', aw.instructions(self.settings))
         self.assertEqual([line for line in self.logs if 'greet' in line], [])
 
-    def test_it_has_no_command_registers_none_and_answers_no_interaction(self):
-        self.assertIsNone(aw.XUJI.command)
+    def test_its_command_is_xuji_registered_in_each_server_and_answering_its_own_alone(self):
+        self.assertEqual(aw.XUJI.command, 'xuji')
         self.ear.hear('GUILD_CREATE', {'id': GUILD, 'channels': [], 'threads': []})
-        self.assertFalse([r for r in self.fake.requests if r[1].startswith('/applications/')])
+        self.assertEqual([command['name'] for command in self.fake.commands[GUILD]], ['xuji'])
+        self.assertEqual(aw.command_list(aw.XUJI)[0]['name'], 'xuji')
         event = {'id': '1600000000000000001', 'type': 2, 'token': 'token-1600000000000000001', 'channel_id': GENERAL}
         self.ear.hear('INTERACTION_CREATE', dict(event, data={'name': 'aogo'}, member={'user': {'id': OWNER}}))
-        self.assertEqual(self.fake.answers, {})
-        self.assertEqual(self.bot.allowed(), {})
-        self.assertNotIn('allow', aw.instructions(self.settings))
+        said = json.dumps(self.fake.answers['1600000000000000001'])
+        self.assertIn('/aogo is not a command of XujiWimsy: it has /xuji.', said)  # AogoWimsy's is not its own
+        helping = dict(event, id='1600000000000000002', token='token-1600000000000000002')
+        helping['data'] = {'name': 'xuji', 'options': [{'name': 'help', 'type': 1}]}
+        self.ear.hear('INTERACTION_CREATE', dict(helping, member={'user': {'id': OWNER}}))
+        said = json.dumps(self.fake.answers['1600000000000000002'], ensure_ascii=False)
+        self.assertIn(f"I'm Xuji, <@{OWNER}>'s AI agent here: every post of mine waits for their approval.", said)
+        self.assertIn('/xuji', said)  # the owner's commands
+        asking = dict(helping, id='1600000000000000003', token='token-1600000000000000003')
+        self.ear.hear('INTERACTION_CREATE', dict(asking, member={'user': {'id': STRANGER}}))
+        said = json.dumps(self.fake.answers['1600000000000000003'], ensure_ascii=False)
+        self.assertIn("I'm Xuji", said)  # anyone may ask for help, a stranger within the limits
+        self.assertNotIn('/xuji allow', said)
+        self.assertIn('allow', aw.instructions(self.settings))
 
     def test_the_gateways_news_come_with_a_tool_error_too(self):
         self.ear.report('trouble', 'OSError: down; it tries again, 60 s apart at most')
