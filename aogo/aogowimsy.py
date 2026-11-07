@@ -91,7 +91,7 @@ this session's statusline-<id>.json, else the account's statusline.json; STATUS_
 <PREFIX>_DIRECT_MINUTES doubled for the quota, the context and the agents high each, halved with quota to spare,
 within DIRECT_RANGE, none at QUOTA_STOP. A direct text passes the pre-harness's
 outbound rules and the bot's own token first; a refusal is an error naming the rule, and the session sends a draft.
-XujiWimsy's client's quota is not Claude Code's: it posts drafts alone. A reaction or a quick reply carries no text,
+XujiWimsy's client reports no quota: its interval is XUJIWIMSY_DIRECT_MINUTES, fixed. A reaction or a quick reply carries no text,
 so it goes at once, and only one of its identity's few emojis; the greeting, an answer to /aogo and a rule's or the
 ice's line are the server's fixed lines, never the session's. Nothing is stored but the
 attachments discord_attachments is asked for, in <XDG_CACHE_HOME or ~/.cache>/<server>/<channel>/<message>/ (folders
@@ -331,6 +331,7 @@ XUJI = Identity(
     '~/.config/xujiwimsy/xujiwimsy.env',
     claude=False,
     command='xuji',
+    direct=True,
     drawn=('wimsyxuji_eyes', 'wimsyxuji_done', 'wimsyxuji_thumbsup', 'wimsyxuji_no'),
     program='xuji/xujiwimsy.py',
 )
@@ -906,7 +907,7 @@ def command_text(settings):
         return ''
     if not identity.claude:  # kept short: Grok Build shows its model the first GROK_SHOWS bytes of these
         return (
-            'Each event and discord_read item says how to answer it (trust, weight, heard, ice, caution, tone, reply); '
+            'Each event and discord_read item says how to answer it (trust, weight, ice, caution, tone, reply); '
             f'/{command} sets who reaches you (trust, allow, weight, tone), each change a kind="notice"; '
             'discord_allowed lists them. Ice who tries what your harness refuses with discord_freeze. '
         )
@@ -970,8 +971,8 @@ def instructions(settings):
         + (
             # kept short: Grok Build shows its model the first GROK_SHOWS bytes of these
             f"Of what it reads, only the owner's messages, its own and those of whom he trusts or allowed with "
-            f"/{command} reach you; another's only when the owner let it through (his :{WIMSY}: on a message "
-            f'addressed to {me}, or his reply mentioning {me}). '
+            f"/{command} reach you; another's only when the owner let it through (his :{WIMSY}: on it, or his reply "
+            f'mentioning {me}). '
             if command and not settings.identity.claude
             else f"Of what it reads, only the owner's messages, those of {users}{allowed} and its own reach you; the "
             f'others are counted, but for a message the owner let through: one addressed to {me} (a mention, or a '
@@ -1045,8 +1046,7 @@ def reacting_text(identity):
         return (
             f'React rather than post, at once and with no draft: discord_react {eyes} when you start on a message, '
             f'then discord_unreact it and put {done} when done; {thumbs} agreed, {no} cannot, each its unicode one '
-            f'while the server lacks it. discord_quick replies with one alone; a text goes through discord_post and the '
-            f"owner's {YES}. "
+            'while the server lacks it. discord_quick replies with one alone; a text goes through discord_post. '
         )
     if not identity.drawn:  # kept short: Grok Build shows its model the first GROK_SHOWS bytes
         return (
@@ -2263,6 +2263,10 @@ class Wimsy:
         doubled for the quota, the context and this session's agents each, halved with the quota under the week's
         share gone, within DIRECT_RANGE; none at QUOTA_STOP, nor with a file missing, stale or another session's"""
         path, base = self.status_file(), self.settings.direct_minutes
+        if not self.settings.identity.claude:  # Grok Build reports no quota, context nor agents: a fixed interval
+            return Pace(
+                base, f'{self.settings.identity.key("DIRECT_MINUTES")} {base}, fixed: its client reports no quota'
+            )
         try:
             found = path.stat()
             data = json.loads(path.read_text(encoding='utf-8'))
@@ -4202,9 +4206,14 @@ def direct_text(identity):
         " With direct true it posts at once, with no draft, pinging no one, when the server's rules let it: a reply "
         f"to the owner's message or a trusted person's, {REPLIES} at most each (in DMs, the owner's alone); a reply to "
         "an allowed person's, to its own or none, once an interval: "
-        f'{identity.key("DIRECT_MINUTES")} ({DIRECT_MINUTES} by default), doubled for the quota at {QUOTA_SLOW}%, the '
-        f'context at {CONTEXT_SLOW}% and {AGENTS_SLOW} agents working each, halved with quota to spare, '
-        f"{DIRECT_RANGE[0]} to {DIRECT_RANGE[1]} min, none at {QUOTA_STOP}% quota; never to a stranger's message. The "
+        f'{identity.key("DIRECT_MINUTES")} ({DIRECT_MINUTES} by default), '
+        + (
+            f'doubled for the quota at {QUOTA_SLOW}%, the context at {CONTEXT_SLOW}% and {AGENTS_SLOW} agents working '
+            f'each, halved with quota to spare, {DIRECT_RANGE[0]} to {DIRECT_RANGE[1]} min, none at {QUOTA_STOP}% quota'
+            if identity.claude
+            else 'fixed, as its client reports no quota'
+        )
+        + "; never to a stranger's message. The "
         'text passes the pre-harness first (tokens, keys, paths of this machine, private addresses, e-mails, title '
         'IDs, the env file). Anything else is an error naming the rule, and for the interval when the next goes: '
         'send the draft yourself. No files. Returns JSON {"status": "sent", "direct": "owner", "trusted" or '

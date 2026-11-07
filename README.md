@@ -256,9 +256,9 @@ instructions to the session say which channels and greeting limits are in effect
 
 Xuji, the Grok Build session, on Discord as a bot user of its own. `xuji/xujiwimsy.py` runs `aogo/aogowimsy.py` with
 Xuji's identity (the table `IDENTITIES` there): its bot, its env file and keys, its name in every text. Everything else
-is AogoWimsy's, a fix to one a fix to both: the tools above but `discord_emoji_upload`, with the same arguments,
-defaults and answers, and no direct post (its client's quota is not Claude Code's: `direct` true is an error saying
-so); the owner's check mark as the only way out. Its command is `/xuji`, AogoWimsy's `/aogo` in its own name: the
+is AogoWimsy's, a fix to one a fix to both: the tools above, with the same arguments, defaults and answers, and its
+direct posts under AogoWimsy's rules (`XUJIWIMSY_DIRECT`, `XUJIWIMSY_DIRECT_MINUTES`) but for the interval, fixed at
+`XUJIWIMSY_DIRECT_MINUTES` as Grok Build reports no quota, context or agents to weigh it by. Its command is `/xuji`, AogoWimsy's `/aogo` in its own name: the
 owner trusts, allows, weighs and ices people and sets a channel's tone, its state in `<XDG_STATE_HOME or
 ~/.local/state>/xujiwimsy/`, and the pre-harness checks what reaches it; `XUJIWIMSY_USERS` lists who starts trusted.
 Its instructions say this shorter than AogoWimsy's, as Grok Build shows its model their first 2048 bytes. Its drawn
