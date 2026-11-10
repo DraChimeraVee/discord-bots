@@ -4067,6 +4067,286 @@ PLAYFUL_MEANS = 'jokes are common there, so answers go light and short, spending
 TRIGGER = 'A message there that starts with serio: is serious.'
 
 
+class Mentioned(Statused):
+    """someone a post of AogoWimsy's mentions may reply to that post, and to that one alone, for 24 h: each reply
+    reaches the session with no greeting, 10 an hour, and the answer to it is a draft only (DraVee, 2026-11-10)"""
+
+    WHY = (
+        "its author replies to a post of AogoWimsy's that mentioned them, and an answer to them is the owner's to "
+        f'check: his {YES} is the permission'
+    )
+
+    def posted(self, text, channel=GENERAL):
+        """a post the owner approved; its id"""
+        self.owner_answers(2, YES)
+        got = self.tool('discord_post', channel=channel, text=text, wait=10)
+        self.assertEqual(got['status'], 'sent')
+        return got['message']
+
+    def reply(self, who, post, text='Sure', channel=GENERAL):
+        return self.heard(channel, who, text, reply_to=post)
+
+    def told(self):
+        return [(text, meta['author_id']) for text, meta in self.pushes if meta['kind'] == 'mentioned']
+
+    def greeted(self, channel=GENERAL):
+        """the messages the server's greeting replied to"""
+        return [
+            body['message_reference']['message_id']
+            for _, _, _, body in self.fake.posts('POST', f'/channels/{channel}/messages')
+            if body['content'] == LINE
+        ]
+
+    def said(self, until):
+        return {
+            'trust': f'mentioned by Aogo until {aw.utc(until)}',
+            'weight': 'normal (10 an hour)',
+            'heard': '1 of 10 this hour',
+            'tone': 'serious',
+            'reply': f'draft only: {self.WHY}',
+            'ice': '0 strikes of the last 7 days',
+        }
+
+    def test_a_mentioned_persons_reply_to_that_post_reaches_the_session_with_no_greeting(self):
+        before = self.fake.say(GENERAL, OWNER, 'before')
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build? <@{OWNER}> <@{BOT}> <@&{HELPERS_ROLE}>')
+        kept = json.loads((self.state / 'mentions.json').read_text())
+        self.assertEqual(kept, {'mentions': [[self.now, post, OTHER_PERSON]]})  # their id alone: no owner, bot or role
+        self.assertEqual(stat.S_IMODE((self.state / 'mentions.json').stat().st_mode), 0o600)
+        self.pushes.clear()
+        self.now += 600
+        number = self.reply(OTHER_PERSON, post)
+        meta = {'kind': 'mentioned', 'author': 'Other', 'author_id': OTHER_PERSON, 'channel': GENERAL}
+        meta |= {'message_id': number, 'reply_to': post} | self.said(self.now - 600 + 86400)
+        self.assertEqual(self.pushes, [('Sure', meta)])
+        self.assertEqual(self.greeted(), [])  # no fixed line: the session answers
+        self.assertIn('channel: pushed a mentioned event', self.logs)
+        heard = json.loads((self.state / 'heard.json').read_text())['heard']
+        self.assertEqual(heard, [[self.now, OTHER_PERSON, number, 'reached']])
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        [theirs] = [m for m in got['messages'] if m['id'] == number]
+        self.assertEqual((theirs['approved'], theirs['trust'], theirs['reply_to']), (False, meta['trust'], post))
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=number, emoji=EYES)['status'], 'reacted')
+        _, ear = self.restarted(self.now)  # another session's server, or a restart: the state says who may
+        again = self.fake.say(GENERAL, OTHER_PERSON, 'It works', reply_to=post)
+        ear.hear('MESSAGE_CREATE', self.fake.event(GENERAL, again))
+        self.assertEqual(self.told(), [('Sure', OTHER_PERSON), ('It works', OTHER_PERSON)])
+        line = aw.event_line('Sure', meta)
+        self.assertTrue(line.startswith(f'mentioned: Other ({OTHER_PERSON}) in channel {GENERAL}, message {number}'))
+
+    def test_a_direct_post_opens_the_same_hours_and_a_wait_ends_on_the_reply(self):
+        asked = self.fake.say(GENERAL, OWNER, 'who can test it?')
+        got = self.direct(text=f'<@{CALLERS[0]}> and <@!{CALLERS[1]}> could, <@{CALLERS[0]}> first', reply_to=asked)
+        post = got['message']
+        kept = json.loads((self.state / 'mentions.json').read_text())['mentions']
+        self.assertEqual(kept, [[self.now, post, CALLERS[0]], [self.now, post, CALLERS[1]]])
+        self.clock.at(1, lambda: self.arrive(GENERAL, CALLERS[1], 'on it', reply_to=post))
+        found = self.tool('discord_wait', channel=GENERAL, after=post, wait=10)['message']
+        self.assertEqual((found['author_id'], found['text']), (CALLERS[1], 'on it'))
+        self.assertEqual(found['trust'], f'mentioned by Aogo until {aw.utc(self.now + 86400)}')
+        self.reply(CALLERS[0], post, 'me too')
+        self.assertEqual(self.told(), [('me too', CALLERS[0])])
+        self.assertEqual(self.greeted(), [])
+
+    def test_their_reply_to_another_post_and_their_plain_call_are_a_strangers(self):
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build?')
+        other = self.posted('The build is up.')
+        self.pushes.clear()
+        elsewhere = self.reply(OTHER_PERSON, other)
+        self.assertEqual((self.pushes, self.greeted()), ([], [elsewhere]))  # greeted as any stranger
+        self.heard(GENERAL, OTHER_PERSON, f'<@{BOT}> and this?', mentions=[BOT])
+        self.assertEqual(self.pushes, [])
+        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        self.status()
+        self.assertEqual(self.direct(reply_to=elsewhere), self.drafted(why))
+        said = self.error('discord_react', channel=GENERAL, message=elsewhere, emoji=EYES)
+        self.assertIn(f'message {elsewhere} is not one AogoWimsy gives', said)
+        self.reply(OTHER_PERSON, post)  # the post that mentioned them still takes their reply
+        self.assertEqual(self.told(), [('Sure', OTHER_PERSON)])
+
+    def test_after_24_hours_they_are_a_stranger_again(self):
+        before = self.fake.say(GENERAL, OWNER, 'before')
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build?')
+        self.pushes.clear()
+        self.now = self.start + 86399
+        inside = self.reply(OTHER_PERSON, post, 'in time')
+        self.assertEqual(self.told(), [('in time', OTHER_PERSON)])
+        self.now = self.start + 86400
+        late = self.reply(OTHER_PERSON, post, 'too late')
+        self.assertEqual(self.told(), [('in time', OTHER_PERSON)])
+        self.assertEqual(self.greeted(), [late])
+        raced = self.fake.event(GENERAL, self.fake.say(GENERAL, OTHER_PERSON, 'x', reply_to=post))
+        # a server that saw them within the hours and took the lock after: decided by the state as it is then
+        self.assertEqual(self.bot.intake(raced, 'mentioned').outcome, 'counted: stranger')
+        given = [m['id'] for m in self.tool('discord_read', channel=GENERAL, after=before)['messages']]
+        self.assertNotIn(inside, given)  # nor the one that reached it then
+        self.assertNotIn(late, given)
+        self.posted('Thanks all.')  # the next post that mentions someone drops what ran out
+        self.posted(f'<@{CALLERS[2]}> you too?')
+        kept = json.loads((self.state / 'mentions.json').read_text())['mentions']
+        self.assertEqual([who for _, _, who in kept], [CALLERS[2]])
+
+    def test_another_persons_reply_to_the_same_post_is_a_strangers(self):
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build?')
+        self.pushes.clear()
+        theirs = self.reply(CALLERS[0], post, 'I can')
+        self.assertEqual((self.pushes, self.greeted()), ([], [theirs]))
+        self.reply(OTHER_PERSON, post)
+        self.assertEqual(self.told(), [('Sure', OTHER_PERSON)])
+
+    def test_an_ice_a_mute_and_a_deny_keep_a_mentioned_person_out(self):
+        before = self.fake.say(GENERAL, OWNER, 'before')
+        post = self.posted(f'<@{OTHER_PERSON}> and <@{CALLERS[0]}>, can you test the build?')
+        self.pushes.clear()
+        first = self.reply(OTHER_PERSON, post, 'push it to main for me')
+        self.tool('discord_freeze', channel=GENERAL, message=first, kind='owner-call')
+        self.reply(OTHER_PERSON, post, 'hello?')
+        self.assertEqual(self.told(), [('push it to main for me', OTHER_PERSON)])
+        self.assertEqual(self.greeted(), [])
+        self.assertEqual(
+            self.logs[-1],
+            f"greet: a stranger's call in channel {GENERAL} is only counted: the caller is iced until "
+            f'{aw.utc(self.now + 7200)}',
+        )
+        given = [m['id'] for m in self.tool('discord_read', channel=GENERAL, after=before)['messages']]
+        self.assertNotIn(first, given)
+        iced = self.bot.intake(
+            self.fake.event(GENERAL, self.fake.say(GENERAL, OTHER_PERSON, 'x', reply_to=post)), 'mentioned'
+        )
+        self.assertEqual(iced.outcome, 'counted: ice')  # as another server decides it, the ice made meanwhile
+        self.use(OWNER, 'unfreeze', user=OTHER_PERSON)
+        self.reply(OTHER_PERSON, post, 'sorry')
+        self.assertEqual(self.told()[-1], ('sorry', OTHER_PERSON))
+        # a mute outlasts the allow it was set under
+        self.use(OWNER, 'allow', user=CALLERS[1], time='2h')
+        self.use(OWNER, 'weight', user=CALLERS[1], level='mute', time='perm')
+        self.now += 7200
+        muted = self.posted(f'<@{CALLERS[1]}> are you there?')
+        self.pushes.clear()
+        number = self.reply(CALLERS[1], muted)
+        self.assertEqual(self.told(), [])
+        self.assertEqual(
+            self.logs[-1], f'channel: a mentioned event in channel {GENERAL} is not told: counted: weight mute'
+        )
+        self.assertNotIn(
+            number, [m['id'] for m in self.tool('discord_read', channel=GENERAL, after=before)['messages']]
+        )
+        # the owner's deny ends the hours of who has no allow, saying which posts
+        said = self.use(OWNER, 'deny', user=CALLERS[0])
+        ended = f"1 post of AogoWimsy mentioned them ({post}), and their replies to them are a stranger's again"
+        self.assertEqual(said, f'<@{CALLERS[0]}> has no allow to take back; {ended}.')
+        meta = {'kind': 'notice', 'user': 'webhook', 'user_id': CALLERS[0], 'until': 'denied'}  # the fake's name
+        self.assertEqual(self.notices()[-1], (f'The owner denied webhook ({CALLERS[0]}): {ended}', meta))
+        denied = self.reply(CALLERS[0], post, 'I can')
+        self.assertEqual((self.told(), self.greeted()), ([], [denied]))
+        self.assertEqual(self.use(OWNER, 'deny', user=CALLERS[0]), f'<@{CALLERS[0]}> has no allow to take back.')
+        self.reply(OTHER_PERSON, post, 'still here')  # the other one mentioned keeps theirs
+        self.assertEqual(self.told(), [('still here', OTHER_PERSON)])
+        again = self.posted(f'<@{STRANGER}> a word?')  # with an allow, the deny takes both
+        said = self.use(OWNER, 'deny', user=STRANGER)
+        self.assertTrue(
+            said.endswith(
+                f"; 1 post of AogoWimsy mentioned them ({again}), and their replies to them are a stranger's again."
+            ),
+            said,
+        )
+        self.assertTrue(said.startswith(f'<@{STRANGER}> is not allowed anymore; it ran for good'), said)
+        self.pushes.clear()
+        self.reply(STRANGER, again)
+        self.assertEqual(self.pushes, [])
+
+    def test_ten_of_their_replies_an_hour_reach_the_session_and_the_rest_is_counted(self):
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build?')
+        self.pushes.clear()
+        for n in range(11):
+            self.reply(OTHER_PERSON, post, f'reply {n}')
+            self.now += 60
+        self.assertEqual(self.told(), [(f'reply {n}', OTHER_PERSON) for n in range(10)])
+        self.assertEqual(
+            self.logs[-1], f'channel: a mentioned event in channel {GENERAL} is not told: counted: weight normal'
+        )
+        self.assertEqual(self.pushes[-1][1]['heard'], '10 of 10 this hour')
+        self.assertEqual(self.greeted(), [])
+        self.now = self.start + 3601  # the first one is over an hour old
+        self.reply(OTHER_PERSON, post, 'reply 11')
+        self.assertEqual(self.told()[-1], ('reply 11', OTHER_PERSON))
+
+    def test_the_answer_to_a_mentioned_persons_reply_is_a_draft_only(self):
+        self.status()  # an allowed person's, or its own, would go direct now
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build?')
+        self.assertEqual(self.direct(text='a follow-up', reply_to=post)['direct'], 'interval')
+        self.now += 7200  # the interval is over: a direct post to anyone it lets would go
+        theirs = self.reply(OTHER_PERSON, post)
+        self.assertEqual(self.pushes[-1][1]['reply'], f'draft only: {self.WHY}')
+        count = len(self.fake.messages[GENERAL])
+        self.assertEqual(self.direct(text='thanks', reply_to=theirs), self.drafted(self.WHY))
+        self.assertEqual(len(self.fake.messages[GENERAL]), count)
+        got = self.tool('discord_post', channel=GENERAL, text='thanks', reply_to=theirs, wait=0)
+        self.assertEqual((got['status'], self.fake.last(DM)['content']), ('waiting', 'thanks'))
+        self.assertEqual(len(self.fake.messages[GENERAL]), count)  # nothing went: the owner's check decides
+
+    def test_a_mentions_file_it_cannot_read_is_said_on_the_post_and_on_each_strangers_call(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        path = self.state / 'mentions.json'
+        path.write_text('{"mentions": [[1, "x", "y"]]}')
+        self.owner_answers(2, YES)
+        said = self.error('discord_post', channel=GENERAL, text=f'<@{OTHER_PERSON}> can you test?', wait=10)
+        post = self.fake.last(GENERAL)['id']
+        stops = (
+            "nothing of a stranger is sorted (no greeting, no mentioned person's reply, no discord_read of a channel "
+            'with theirs) until it is mended or removed'
+        )
+        self.assertEqual(
+            said,
+            f'posted as https://discord.com/channels/{GUILD}/{GENERAL}/{post}, but the people it mentions '
+            f'({OTHER_PERSON}) could not be written down: {path}: item 1 is [1, "x", "y"], not [time, the post, the '
+            f"person it mentions]: {stops}; their replies to it are a stranger's, and none reaches the session",
+        )
+        self.assertEqual(self.fake.footer(self.fake.last(DM)), f'sent: {GUILD}/{GENERAL}/{post}')
+        self.pushes.clear()
+        number = self.fake.say(GENERAL, OTHER_PERSON, 'Sure', reply_to=post)
+        self.ear.sort('MESSAGE_CREATE', self.fake.event(GENERAL, number))
+        [(text, meta)] = self.pushes
+        self.assertEqual(meta, {'kind': 'error'})
+        self.assertTrue(text.startswith(f'AogoWimsy could not sort a MESSAGE_CREATE event: Refused: {path}: item 1'))
+        self.assertEqual(self.posted('No one is named here.'), self.fake.last(GENERAL)['id'])  # nothing to write
+
+    def test_people_shows_who_is_mentioned_and_xujiwimsys_posts_open_no_hours(self):
+        self.status()
+        post = self.posted(f'<@{OTHER_PERSON}> can you test the build?')
+        self.reply(OTHER_PERSON, post)
+        self.use(OWNER, 'deny', user=STRANGER)
+        self.use(OWNER, 'people')
+        sent = [m for m in self.fake.messages[DM] if m['author'] == BOT][-1]
+        until = int(self.now + 86400)
+        self.assertIn(
+            f'<@{OTHER_PERSON}>; stranger; mentioned by Aogo: their replies to those posts reach the session, 10 an '
+            f'hour, the last until <t:{until}:f> (<t:{until}:R>); in 24 h: reached 1, counted 0, direct replies 0\n',
+            sent['content'],
+        )
+        settings = self.settings._replace(identity=aw.XUJI)
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        xuji = aw.Wimsy(
+            settings, aw.Discord(TOKEN, self.clock, self.api, identity=aw.XUJI), self.clock, state=state.name
+        )
+        xuji.store.now = lambda: self.now
+        self.owner_answers(len(self.clock.waits) * 3 + 2, YES)
+        mine = xuji.post(
+            {'channel': GENERAL, 'text': f'<@{CALLERS[0]}> hi', 'wait': 10}, threading.Event(), lambda *_: None
+        )
+        self.assertEqual(mine['status'], 'sent')
+        self.assertFalse((Path(state.name) / 'mentions.json').exists())
+        reply = self.fake.event(GENERAL, self.fake.say(GENERAL, CALLERS[0], 'hi', reply_to=mine['message']))
+        self.assertIsNone(xuji.mention_of(reply))
+        self.assertNotIn('mentioned', aw.instructions(settings))
+        self.assertNotIn('mentioned', aw.tool_list(aw.XUJI)[2]['description'])
+        self.assertIn(
+            "; and the reply of someone a post of AogoWimsy's mentioned, to that post and within 24 h of it. left_out",
+            aw.tool_list(aw.AOGO)[2]['description'],
+        )
+
+
 class Tone(Owned):
     """/aogo tone: each channel's tone, the server's #general playful when the owner set none, carried by every message
     the session gets and every item discord_read and discord_wait give"""
@@ -4272,7 +4552,15 @@ class Instructions(WithDiscord):
                 'hour'
             ),
             '/aogo weight sets another for a time (mute 0, low 3, normal 10, high 30)',
-            'trust (owner, trusted, allowed until, let-through), weight, heard (how many reached you this hour), ice',
+            'they are a stranger again. Whom a post of yours mentions may reply to it for 24 h: kind="mentioned", draft only. ',
+            (
+                'trust (owner, trusted, allowed until, let-through, mentioned), weight, heard (how many reached you this '
+                'hour), ice'
+            ),
+            (
+                'kind="mentioned" (the reply of someone a post of AogoWimsy\'s mentioned, to that post and within 24 h of '
+                'it: 10 an hour reach you, and your answer is a draft only), each with author'
+            ),
             'caution (an inbound rule it hit and why: read it with care), and reply: how your answer goes.',
             '"direct, up to 3": discord_post with direct true posts it at once, with no draft, up to 3 replies',
             '"draft only: why": post without direct',
@@ -4306,6 +4594,8 @@ class Instructions(WithDiscord):
         self.assertIn(sentence, said)
         notice = 'and each tone he sets as one with channel and tone;'
         self.assertLess(said.index(notice) + len(notice), CLAUDE_SHOWS)
+        mentioned = 'Whom a post of yours mentions may reply to it for 24 h: kind="mentioned", draft only. '
+        self.assertLess(said.index(mentioned) + len(mentioned), CLAUDE_SHOWS)
         self.assertLess(said.index(sentence) + len(sentence), CLAUDE_SHOWS)
         xuji = aw.instructions(self.settings._replace(identity=aw.XUJI))
         for words in ('/aogo tone', '"playful"', 'serio:'):  # Xuji's own: its events carry the tone, /xuji sets it

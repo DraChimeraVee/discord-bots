@@ -68,6 +68,14 @@ The owner lets a stranger's message through, that one message:
 - by replying to it with a message that mentions AogoWimsy, whoever wrote it; anyone else's reply lets nothing
   through.
 
+Someone a post of AogoWimsy's mentions (`<@id>` in its text; a draft the owner approved, or a direct post) may reply to
+that post, and to that one alone, for 24 hours after it (DraVee, 2026-11-10: "so you can see the reply of who you
+mentioned"). Each reply reaches the session as `kind="mentioned"`, with no greeting, 10 an hour as an allowed person's,
+and `discord_read`, `discord_wait`, the reactions and `discord_attachments` take it; the session's answer to it is a
+draft only. Their reply to any other message, their plain call and another person's reply to the same post are a
+stranger's, as theirs are once the 24 hours are over, with no word to them. An ice, a mute still in force or the owner's
+`/aogo deny` (which ends their hours, naming the posts) keeps them out. XujiWimsy's posts open none.
+
 A stranger who calls AogoWimsy in a channel it reads (a mention of it or of its role, or a reply to one of its
 messages) gets at once, from the server itself and with no draft, this reply, which pings the owner and no one else
 (`allowed_mentions` names his id alone, and not the person it replies to):
@@ -95,13 +103,13 @@ of it and never for a subcommand; each answer is seen by its asker alone and pin
 |---|---|---|
 | `/aogo help` | anyone | the greeting's line, then `To ask me something, mention @AogoWimsy with what you need; DraVee lets it through.`; for the owner, his three commands below too. A stranger gets it within the greeting's limits (counted apart from the greeting), and past one is answered how long ago they asked, or how many asked in the hour |
 | `/aogo allow user [time]` | the owner | lets that member's messages reach the session, 10 an hour, for `2h`, `1d`, `7d` or `perm` (Discord's picker shows 2 hours, 1 day, 7 days, permanent), `1d` when he names none; a new allow takes the old one's place and says until when it ran. Another time, the owner and the bot itself are refused, naming why |
-| `/aogo deny user` | the owner | takes that member's allow back, or says they have none (and, for someone trusted, that `/aogo untrust` takes that) |
+| `/aogo deny user` | the owner | takes that member's allow back, or says they have none (and, for someone trusted, that `/aogo untrust` takes that); ends the hours they had to reply to the posts that mentioned them, naming those posts |
 | `/aogo allowed` | the owner | each allow in force and until when, in each reader's own time zone, the soonest end first, then who is trusted |
 | `/aogo trust user`, `/aogo untrust user` | the owner | their messages reach the session as one he trusts (30 an hour, and direct answers), or no longer |
 | `/aogo weight user level [time]` | the owner | `mute`, `low`, `normal` or `high`: 0, 3, 10 or 30 of their messages an hour reach the session, for `2h`, `1d`, `7d` or `perm` (`1d` without one); then their level's again (trusted high, allowed normal). A stranger has none to weigh |
 | `/aogo unfreeze user` | the owner | ends their ice now; their strikes stay |
 | `/aogo admins role` | the owner | that server's admin role, which the ice lines for a secret or abuse ping |
-| `/aogo people` | the owner | sends him, in his DMs with AogoWimsy, everyone with a state: trusted or allowed until when, their weight and until when, their ice and strikes of the last 7 days, and of the last 24 hours the messages that reached the session, were only counted, or were rejected by each rule, and the direct replies to theirs; then the interval in force and why, and the direct posts of the day |
+| `/aogo people` | the owner | sends him, in his DMs with AogoWimsy, everyone with a state: trusted or allowed until when, mentioned by a post and until when their replies to it reach the session, their weight and until when, their ice and strikes of the last 7 days, and of the last 24 hours the messages that reached the session, were only counted, or were rejected by each rule, and the direct replies to theirs; then the interval in force and why, and the direct posts of the day |
 | `/aogo tone [channel mode]` | the owner | sets that channel's tone, `playful` (jokes are common there: light, short answers) or `serious` (focused work), a hint each of its messages carries to the session; a thread takes its channel's unless set itself. Alone, every channel's tone. Without one set, the server's #general (`1558959542543589416`) is playful, every other channel and DMs serious; in a playful channel a message that starts with `serio:` (any case, with or without the accent, after spaces or mentions) is serious. A channel without a mode, or a mode without one, is refused naming the tone in force |
 
 Anyone but the owner who uses one of his is answered `Only @DraVee can use /aogo allow.`, and nothing changes. The owner
@@ -121,11 +129,12 @@ Nothing is stored but the attachments `discord_attachments` is asked for (folder
 removes them), and the bot's state, in `<XDG_STATE_HOME or ~/.local/state>/aogowimsy/` (folder 700, files 600), so a
 restart keeps it: `greetings.json` and `helps.json`, the time and the person's id of each greeting and help of the last
 `AOGOWIMSY_GREET_HOURS` hours; `allowed.json`, each allow in force (the person's id and name, since and until when); and
-`interactions.json`, each use of `/aogo` of the last day with the notice it made. Every session started where
+`interactions.json`, each use of `/aogo` of the last day with the notice it made; and `mentions.json`, the time, the
+post's id and the person's id of each mention in a post of the last 24 hours, nothing else of them. Every session started where
 `.mcp.json` names AogoWimsy runs a server of its own, and all of them hear the same call: each look at those files and
 its change are made under the lock `state.lock` beside them, so one of them greets or answers and the others see it
 done. Beside them: `people.json` (each person's trust, weight, ice and strikes), `heard.json` (what became of each
-message of a trusted, allowed or let-through person of the last day, so two sessions count it once), `direct.json` (each
+message of a trusted, allowed, let-through or mentioned person of the last day, so two sessions count it once), `direct.json` (each
 direct post of the last day, so they share the caps and the interval), `admins.json` (each server's admin role),
 `tones.json` (each channel's tone the owner set, where it differs from the one it has without it) and `flags.json` (the
 notes to the owner said once). A file there it did not write stops what reads it (the greetings, the help, the allows or
@@ -148,6 +157,7 @@ Discord. XujiWimsy (below) refuses Claude Code the same way.
 | someone he trusts (`/aogo trust`; `AOGOWIMSY_USERS` lists who starts trusted) | 30 messages an hour (`high`) | direct, up to 3 replies to each of theirs, no interval |
 | someone he allowed (`/aogo allow`) | 10 an hour (`normal`) | direct, once an interval |
 | a stranger he let through with `:wimsyaogo:` | that message | a draft only |
+| someone a post of AogoWimsy's mentioned | their replies to that post, for 24 hours after it, 10 an hour | a draft only |
 | a stranger | the greeting, nothing else | nothing |
 | someone iced | nothing: only counted | the ice's fixed line, once |
 
@@ -206,8 +216,9 @@ body:
 
 | `kind` | What wakes the session | Its attributes |
 |---|---|---|
-| `message` | a message addressed to AogoWimsy (a mention, or a reply to one of its messages) from the owner, someone he trusts or allowed, in a channel it may read, within their weight and passing the pre-harness; any DM one of them sends it. When the owner replies to someone while mentioning AogoWimsy, the text ends with the message he replied to, whole | `author`, `author_id`, `channel`, `message_id`, `reply_to`, `attachments`; `quoted_author`, `quoted_author_id`, `quoted_attachments` for the owner's reply; and so the session needs no rule in its head: `trust` (`owner`, `trusted`, `allowed until ...`, `let-through`), `weight` and `heard` (`2 of 30 this hour`) for someone trusted or allowed, `ice` (strikes of the last 7 days), `caution` (each inbound rule it hit, and why), `tone` (`playful`, `serious`, `serious (serio:)`, or `unknown: ...` when its channel or `tones.json` cannot be read), `reply` (`direct, up to 3`, `direct from 14:30 UTC (interval 30 min: quota 56%)`, `draft only: ...`) |
+| `message` | a message addressed to AogoWimsy (a mention, or a reply to one of its messages) from the owner, someone he trusts or allowed, in a channel it may read, within their weight and passing the pre-harness; any DM one of them sends it. When the owner replies to someone while mentioning AogoWimsy, the text ends with the message he replied to, whole | `author`, `author_id`, `channel`, `message_id`, `reply_to`, `attachments`; `quoted_author`, `quoted_author_id`, `quoted_attachments` for the owner's reply; and so the session needs no rule in its head: `trust` (`owner`, `trusted`, `allowed until ...`, `let-through`, `mentioned by Aogo until ...`), `weight` and `heard` (`2 of 30 this hour`) for someone trusted or allowed, `ice` (strikes of the last 7 days), `caution` (each inbound rule it hit, and why), `tone` (`playful`, `serious`, `serious (serio:)`, or `unknown: ...` when its channel or `tones.json` cannot be read), `reply` (`direct, up to 3`, `direct from 14:30 UTC (interval 30 min: quota 56%)`, `draft only: ...`) |
 | `approved` | a stranger's message addressed to AogoWimsy, once the owner puts his `:wimsyaogo:` reaction on it, once, passing the pre-harness | as `message` |
+| `mentioned` | the reply of someone a post of AogoWimsy's mentioned, to that post and within 24 hours of it, within 10 an hour and passing the pre-harness, unless they are iced or muted | as `message`: `trust` is `mentioned by Aogo until ...`, `weight` `normal (10 an hour)`, `reply` `draft only: ...` |
 | `dm` | someone neither the owner nor listed wrote to AogoWimsy in DMs: their name and id, never what they wrote; once a person while it runs | `author`, `author_id` |
 | `draft` | the owner's check mark or cross on a draft this session made, still waiting: it is posted or refused then, not on a tool's next look (another session's draft waits for that session) | `draft`, `status` (sent, not sent), `channel`; `message_id` once posted |
 | `error`, `notice` | the gateway stopped (a close code Discord takes no new try after: a token that is not the bot's, intents not turned on), cannot be reached for three tries in a row, or is back; a greeting, a registration or an answer to `/aogo` that failed; a state file it cannot read; the owner's allow, deny, trust, untrust, weight, unfreeze or tone, a weight or an ice running out, an ice another session made, and a message the pre-harness rejected (each a `notice`) | `user`, `user_id`, and what changed: `until` (an ISO 8601 time in UTC, `permanent`, `denied`, `ran out`), `trust`, `weight`, `ice`; a tone: `channel` and `tone`; a rejection: `channel` and `rule` |
@@ -357,7 +368,8 @@ once, the deprecation DM once; the ice: each kind's line and admin ping, the day
 and the trusted never iced; the pre-harness: every rule's own examples, the loader's refusals, the emoji joiners, the
 languages, the owner's exemption, a rejection told and answered once; direct posts: each row of the table, the cap of 3,
 each factor of the interval and its bounds, a statusline missing, stale or another session's, each outbound rule, a
-refused post taking no turn; each event's attributes and `/aogo people`; `/aogo tone`: the owner's alone, the
+refused post taking no turn; a mentioned person's replies: that post alone, 24 hours, 10 an hour, a draft only, the
+ice, the mute and the deny, a file it cannot read; each event's attributes and `/aogo people`; `/aogo tone`: the owner's alone, the
 default, threads, the `serio:` trigger in any case with or without its accent, the item kept only where it differs, a
 restart, the notice, an unreadable file or channel said in `tone`), and its gateway client against a fake gateway
 on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the close codes that stop it, pings, messages in frames), and

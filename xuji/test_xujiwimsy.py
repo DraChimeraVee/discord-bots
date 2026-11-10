@@ -194,9 +194,14 @@ class Handshake(WithXuji):
         mine = xuji[0]['description']
         self.assertTrue(mine.endswith(aw.direct_text(aw.XUJI)))
         as_aogo[0]['description'] = as_aogo[0]['description'][: len(drafts['description'])]
+        # discord_read less the replies of whom a post mentions, which Aogo's posts alone open
+        mentioned = "; and the reply of someone a post of AogoWimsy's mentioned, to that post and within 24 h of it"
+        reads = json.loads(json.dumps(aogo[2]))
+        self.assertEqual((reads['name'], reads['description'].count(mentioned)), ('discord_read', 1))
+        reads['description'] = reads['description'].replace(mentioned, '')
         self.assertEqual(
             [tool for tool in as_aogo if tool['name'] not in reacting],
-            [drafts] + [tool for tool in aogo[1:] if tool['name'] not in (*reacting, *aogos)],
+            [drafts] + [tool for tool in [aogo[1], reads, *aogo[3:]] if tool['name'] not in (*reacting, *aogos)],
         )
         self.assertIn('XUJIWIMSY_DIRECT_MINUTES (30 by default), fixed, as its client reports no quota', mine)
         self.assertNotIn('doubled for the quota', mine)

@@ -55,6 +55,12 @@ the call is only counted, as any other stranger's message, and the session hears
 owner's WIMSY reaction still lets the call through. A stranger's DM is not greeted: the session gets its name, once.
 XujiWimsy greets no one.
 
+Someone a post of AogoWimsy's mentions (<@id>; a draft the owner approved, or a direct post) may reply to that post,
+and to that one alone, for MENTION_HOURS hours after it: each reply reaches the session as kind mentioned, with no
+greeting, MENTION_WEIGHT's messages an hour as an allowed person's, and the session's answer to it is a draft only. To
+any other message they are a stranger, as they are once the hours are over; an ice, a mute or the owner's deny (which
+ends their hours) still keeps them out. XujiWimsy's posts open none.
+
 AogoWimsy registers its slash command, /aogo (command_list), in each server it is in when the gateway brings the
 server, guild-scoped so it shows at once, and sends it only when the server's differs from it. /aogo help answers
 anyone, seen by them alone: GREETING and how to ask, a stranger within the greeting's limits (counted apart), the
@@ -100,9 +106,10 @@ every server of the bot sharing it under the lock state.lock): greetings.json an
 person's id of each greeting and help of the last GREET_HOURS hours; allowed.json, each allow in force (the person's
 id and name, since and until when); interactions.json, each use of /aogo of the last day and the notice it made, so
 no server answers one twice; people.json, each person's trust, weight, ice and strikes; heard.json, what became of
-each message of a trusted, allowed or let-through person of the last day; direct.json, each direct post of the last
-day; admins.json, each server's admin role; tones.json, each channel's tone the owner set where it differs from
-the one it has without it; flags.json, the notes to the owner said once. A draft waiting is a
+each message of a trusted, allowed, let-through or mentioned person of the last day; direct.json, each direct post
+of the last day; mentions.json, the time, the post's id and the person's id of each mention of a post of the last
+MENTION_HOURS hours; admins.json, each server's admin role; tones.json, each channel's tone the owner set where it
+differs from the one it has without it; flags.json, the notes to the owner said once. A draft waiting is a
 message in the owner's DMs, read again at each look, and stderr says what ran or failed, never what was said nor who
 said it.
 """
@@ -153,6 +160,7 @@ class Identity(NamedTuple):
     drawn: tuple = ()  # its custom emojis, one for each of MEANINGS (EMOJI_FOLDER/<name>.png); (): unicode alone
     program: str = 'aogo/aogowimsy.py'  # its program, from the repository's root: the monitor runs it --listen
     direct: bool = False  # True: it may post at once, within its rules, the quota and context of Claude Code's
+    mentions: bool = False  # True: someone a post of its mentions may reply to that post (MENTION_HOURS)
 
     def key(self, name):
         return f'{self.prefix}_{name}'
@@ -272,6 +280,13 @@ TONE_MEANS = {  # what a tone asks of the session's answers, as the owner's answ
     'playful': 'jokes are common there, so answers go light and short, spending little work',
     'serious': 'a channel for focused work',
 }
+# The replies of whom a post mentions (DraVee, 2026-11-10: "We need to change AogoWinsy to allow the reply on your
+# message, so you can see the reply of who you mentioned"): someone a post of the bot's mentions may reply to that
+# post, and to that one alone, for MENTION_HOURS after it; each reply reaches the session with no greeting, as many an
+# hour as MENTION_WEIGHT lets, and the answer to it is a draft only. An ice, a mute or a deny still keeps them out
+MENTION_HOURS = 24  # hours after a post that those it mentions may reply to it
+MENTION_WEIGHT = 'normal'  # the weight of their replies, an allowed person's
+MENTION = re.compile(r'<@!?([0-9]{17,20})>')  # a person's mention in a text; <@&id> is a role's
 OWNED = "'s"  # what heard_words adds for whose message
 HEARD_FOR = 24 * 3600  # seconds what became of a message is kept: the counts of the day
 TICK = 15.0  # seconds between two looks at the people's state for what ran out
@@ -297,6 +312,10 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
     'flags': 'the one-time notes to the owner wait',
     'admins': 'no admin role is pinged',
     'direct': 'no post goes direct',
+    'mentions': (
+        "nothing of a stranger is sorted (no greeting, no mentioned person's reply, no discord_read of a channel with "
+        'theirs)'
+    ),
 }
 YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
 # The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
@@ -322,6 +341,7 @@ AOGO = Identity(
     command='aogo',
     drawn=DRAWN,
     direct=True,
+    mentions=True,
 )
 XUJI = Identity(
     'xujiwimsy',
@@ -916,10 +936,16 @@ def command_text(settings):
         'lists who starts trusted) up to 30 messages an hour; whom he allowed (/{command} allow for 2 hours, 1 day, 7 '
         f'days or for good, 1 day when he names no time; /{command} deny) up to 10, their messages addressed to {me} '
         f'and their DMs as kind="message"; /{command} weight sets another for a time (mute 0, low 3, normal 10, high '
-        '30). Past it, or while iced, a message is only counted; when an allow runs out they are a stranger again, '
-        'with '
-        'no word to them. Each message and approved event, and each discord_read and discord_wait item, says what you '
-        'need to answer it: trust (owner, trusted, allowed until, let-through), weight, heard (how many reached you '
+        '30). Past it, or while iced, a message is only counted; when an allow runs out they are a stranger again. '
+        + (
+            f'Whom a post of yours mentions may reply to it for {MENTION_HOURS} h: kind="mentioned", draft only. '
+            if identity.mentions
+            else ''
+        )
+        + 'Each message and approved event, and each discord_read and discord_wait item, says what you '
+        'need to answer it: trust (owner, trusted, allowed until, let-through'
+        + (', mentioned' if identity.mentions else '')
+        + '), weight, heard (how many reached you '
         'this hour), ice (strikes of the last 7 days), caution (an inbound rule it hit and why: read it with care), '
         "and reply: how your answer goes. Each also carries tone, the owner's hint about its channel (/{command} "
         'tone), not a rule about the message: "playful", jokes are common there, answer light and short and spend '
@@ -990,12 +1016,17 @@ def instructions(settings):
             'their DM; when the owner replied to someone while mentioning '
             f'{me}, the text ends with the message he replied to, and quoted_author and quoted_author_id name its '
             'author), kind="approved" (a stranger\'s addressed message the owner let through with the reaction), '
-            f'each with author, author_id, channel, message_id and reply_to; kind="dm" (someone else wrote to {me} in '
-            'DMs: their name only), kind="draft" (the owner answered a draft in his DMs, and it was posted or refused '
-            'at once: draft, status, channel, and message_id once posted), kind="error" or "notice" (the gateway'
-            + ('; a change of who reaches you' if command else '')
-            + '). '
-            + answering(settings.identity)
+            + (
+                f'kind="mentioned" (the reply of someone a post of {me}\'s mentioned, to that post and within '
+                f'{MENTION_HOURS} h of it: {WEIGHTS[MENTION_WEIGHT]} an hour reach you, and your answer is a draft '
+                'only), '
+                if settings.identity.mentions
+                else ''
+            )
+            + 'each with author, author_id, channel, message_id and reply_to; kind="dm" (someone else wrote to '
+            f'{me} in DMs: their name only), kind="draft" (the owner answered a draft in his DMs, and it was posted or '
+            'refused at once: draft, status, channel, and message_id once posted), kind="error" or "notice" (the '
+            'gateway' + ('; a change of who reaches you' if command else '') + '). ' + answering(settings.identity)
         )
     return said + (
         "Discord reaches you through a monitor: at the session's start, run the monitor tool, persistent, "
@@ -1349,6 +1380,10 @@ SHAPES = {
             and item[3] in ('owner', 'trusted', 'interval')
             and (item[4] is None or an_id(item[4]))
         ),
+    ),
+    'mentions': (
+        '[time, the post, the person it mentions]',
+        lambda item: isinstance(item, list) and len(item) == 3 and stamp(item[0]) and all(map(an_id, item[1:])),
     ),
     'admins': (
         '[server id, role id]',
@@ -2102,13 +2137,69 @@ class Wimsy:
                 )
         return frozenset(value)
 
+    def keep_mentions(self, posted, text, shown_as):
+        """writes down whom a post of the bot's mentions, so each may reply to it for MENTION_HOURS: their ids alone,
+        with the post's and the time; never the owner nor the bot. A state it cannot write is Refused saying the post
+        went (shown_as: its link) and what those people's replies are now"""
+        if not self.settings.identity.mentions:
+            return
+        people = dict.fromkeys(MENTION.findall(text))
+        people = [person for person in people if person not in (self.settings.owner, self.me())]
+        if not people:
+            return
+        try:
+            with self.store.locked():
+                now = self.store.now()
+                kept = [item for item in self.store.load('mentions') if item[0] > now - MENTION_HOURS * 3600]
+                self.store.save('mentions', kept + [[now, posted, person] for person in people])
+        except (Refused, OSError) as error:
+            raise Refused(
+                f'posted as {shown_as}, but the people it mentions ({by_id(people)}) could not be written down: '
+                f"{error}; their replies to it are a stranger's, and none reaches the session"
+            ) from None
+
+    def mention_of(self, message, now=None, items=None):
+        """when the post a message replies to mentioned its author, if within MENTION_HOURS of now, else None: the
+        reply of someone a post of the bot's mentioned, to that post (items: the mentions read under the lock)"""
+        if not self.settings.identity.mentions or message.get('type') != REPLY:
+            return None
+        post = (message.get('message_reference') or {}).get('message_id')
+        now = self.store.now() if now is None else now
+        items = self.store.cached('mentions') if items is None else items
+        author = message['author']['id']
+        return max(
+            (
+                when
+                for when, number, who in items
+                if number == post and who == author and when > now - MENTION_HOURS * 3600
+            ),
+            default=None,
+        )
+
+    def mute_set(self, standing, now):
+        """whether the owner's mute is in force for a person, a stranger too: standing weighs only the trusted and the
+        allowed, and a mute set while someone was allowed outlasts the allow"""
+        weight = standing.item['weight'] if standing.item else None
+        return bool(weight and weight['level'] == 'mute' and (weight['until'] is None or weight['until'] > now))
+
+    def invited(self, message, now=None):
+        """whether a message is a mentioned person's reply the session may be given: within the hours, its author
+        neither iced nor muted"""
+        if self.store is None or self.mention_of(message, now) is None:
+            return False
+        now = self.store.now() if now is None else now
+        standing = self.standing(message['author']['id'], now)
+        return not standing.ice and not self.mute_set(standing, now)
+
     def intake(self, message, kind):
-        """what becomes of a message of a trusted or allowed person (kind message) or one the owner let through
-        (approved), decided once under the state's lock whichever server of the bot hears it first: 'reached';
-        'counted: ice' while its author is iced (the owner's letting through passes); 'rejected: <rule>' by the
-        pre-harness, which may ice its author; or 'counted: weight <level>' past the messages an hour its weight lets
-        reach the session. Intake(outcome, whether this server decided it, the rejecting hit, the ice's until when it
-        iced, whether the rule's line is due)"""
+        """what becomes of a message of a trusted or allowed person (kind message), one the owner let through
+        (approved) or a mentioned person's reply (mentioned), decided once under the state's lock whichever server of
+        the bot hears it first: 'reached'; 'counted: stranger' for someone neither allowed nor, now, within a
+        mention's hours; 'counted: ice' while its author is iced (the owner's letting through passes); 'rejected:
+        <rule>' by the pre-harness, which may ice its author; or 'counted: weight <level>' past the messages an hour
+        its weight lets reach the session (a mentioned stranger's: MENTION_WEIGHT; mute for one the owner muted).
+        Intake(outcome, whether this server decided it, the rejecting hit, the ice's until when it iced, whether the
+        rule's line is due)"""
         person, number = message['author']['id'], message['id']
         name = message['author'].get('global_name') or message['author'].get('username') or person
         hit = self.rejects(message)
@@ -2121,10 +2212,19 @@ class Wimsy:
             people = self.store.load('people')
             standing = self.standing(person, now, people, self.store.load('allowed'))
             outcome, until, due = 'reached', None, False
+            weight = standing.weight or MENTION_WEIGHT  # a stranger weighs nothing but as one mentioned
             if kind == 'message' and standing.level == 'stranger':
                 outcome = 'counted: stranger'  # their allow ran out as the message came
-            elif kind == 'message' and standing.ice:
+            elif (
+                kind == 'mentioned'
+                and standing.level == 'stranger'
+                and self.mention_of(message, now, self.store.load('mentions')) is None
+            ):
+                outcome = 'counted: stranger'  # the hours ran out, or the owner denied them, as the message came
+            elif kind != 'approved' and standing.ice:
                 outcome = 'counted: ice'
+            elif kind == 'mentioned' and self.mute_set(standing, now):
+                outcome = 'counted: weight mute'
             elif hit:
                 outcome = f'rejected: {hit.rule.id}'
                 if hit.rule.ice and standing.level != 'trusted':
@@ -2133,12 +2233,12 @@ class Wimsy:
                 due = until is not None or not any(
                     who == person and said == outcome and when > now - LINE_EVERY for when, who, _, said in heard
                 )
-            elif kind == 'message':
+            elif kind != 'approved':
                 hour = sum(
                     1 for when, who, _, said in heard if who == person and said == 'reached' and when > now - 3600
                 )
-                if hour >= WEIGHTS[standing.weight]:
-                    outcome = f'counted: weight {standing.weight}'
+                if hour >= WEIGHTS[weight]:
+                    outcome = f'counted: weight {weight}'
             self.store.save('heard', heard + [[now, person, number, outcome]])
             return Intake(outcome, True, hit, until, due)
 
@@ -2368,6 +2468,11 @@ class Wimsy:
             elif standing.level == 'allowed' and standing.ice:
                 return draft(f'its author is iced until {utc(standing.ice["until"])} ({standing.ice["kind"]})')
             elif standing.level == 'stranger' and author != self.me():
+                if self.mention_of(message, now) is not None:
+                    return draft(
+                        f"its author replies to a post of {self.title}'s that mentioned them, and an answer to them is "
+                        f"the owner's to check: his {YES} is the permission"
+                    )
                 return draft(
                     f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
                 )
@@ -2407,8 +2512,14 @@ class Wimsy:
             guild = message.get('guild_id')
             where = {'id': message['channel_id'], 'type': None if guild else DM, 'guild_id': guild}
         said = {}
+        mentioned = self.mention_of(message, now) if kind == 'mentioned' and standing.level == 'stranger' else None
         if standing.level == 'allowed':
             said['trust'] = f'allowed {ran(standing.allow["until"], utc)}'
+        elif mentioned is not None:
+            until = utc(mentioned + MENTION_HOURS * 3600)
+            said['trust'] = f'mentioned by {self.settings.identity.who} until {until}'
+            said['weight'] = f'{MENTION_WEIGHT} ({WEIGHTS[MENTION_WEIGHT]} an hour)'
+            said['heard'] = f'{self.hour_of(author, now)} of {WEIGHTS[MENTION_WEIGHT]} this hour'
         elif standing.level == 'stranger':
             said['trust'] = 'let-through' if kind == 'approved' else 'stranger'
         else:
@@ -2508,6 +2619,7 @@ class Wimsy:
             self.store.save('direct', [item[:4] + [posted] if item[1] == mark else item for item in items])
         log(f'discord_post: direct ({way.rule}), message {posted} in channel {channel}')
         got = {'status': 'sent', 'direct': way.rule, 'link': link(where.get('guild_id'), channel, posted)}
+        self.keep_mentions(posted, text, got['link'])
         got.update(message=posted, channel=channel)
         if way.rule == 'interval':
             got.update(next=utc(now + way.minutes * 60), interval=f'{way.minutes} min: {way.why}')
@@ -2649,6 +2761,7 @@ class Wimsy:
             self.edit(dm, draft, card)
         except DiscordError as error:
             raise DiscordError(f'posted as {where_to}, but draft {draft} still says sending: {error}') from None
+        self.keep_mentions(posted, message['content'], where_to)
         return {'status': 'sent', 'link': where_to, 'message': posted, 'channel': channel, 'draft': draft}
 
     def read(self, args, cancelled, progress):
@@ -2676,6 +2789,8 @@ class Wimsy:
                 kept.append(view(message) | self.about(message, 'message', now, pace, where))
             elif named is None and author != me and (message['id'] in quoted or self.let_through(channel, message, me)):
                 kept.append(view(message, approved=True) | self.about(message, 'approved', now, pace, where))
+            elif named is None and author != me and self.invited(message, now):
+                kept.append(view(message) | self.about(message, 'mentioned', now, pace, where))
         newest = page[-1]['id'] if page else after
         return {'channel': channel, 'messages': kept, 'left_out': len(page) - len(kept), 'after': newest}
 
@@ -2693,9 +2808,9 @@ class Wimsy:
             after = page[-1]['id']
 
     def readable(self, channel, message):
-        """Refused unless discord_read gives the message: the owner's, a listed user's, the bot's own, or one the owner
-        let through (his WIMSY reaction, or his reply mentioning the bot among the PAGE messages after it); the
-        refusal names no one"""
+        """Refused unless discord_read gives the message: the owner's, a listed user's, the bot's own, one the owner
+        let through (his WIMSY reaction, or his reply mentioning the bot among the PAGE messages after it), or a
+        mentioned person's reply to the post that mentioned them; the refusal names no one"""
         me = self.me()
         hit = self.rejects(message)
         if hit:
@@ -2704,7 +2819,7 @@ class Wimsy:
             )
         if message['author']['id'] == me or self.person(message['author']['id']):
             return
-        if message['id'] in self.approved or self.let_through(channel, message, me):
+        if message['id'] in self.approved or self.let_through(channel, message, me) or self.invited(message):
             return
         later = self.discord('GET', f'/channels/{channel}/messages', after=message['id'], limit=PAGE)
         roles = self.roles()
@@ -2970,7 +3085,7 @@ class Wimsy:
         if sub == 'allow':
             return self.allow(target, name, values.get('time'), now)
         if sub == 'deny':
-            return self.deny(target, now)
+            return self.deny(target, name, now)
         if sub in ('trust', 'untrust'):
             return self.trust(target, name, sub == 'trust', now)
         if sub == 'unfreeze':
@@ -3022,6 +3137,8 @@ class Wimsy:
         direct = [item for item in self.store.load('direct') if item[0] > now - HEARD_FOR]
         names = {item['id']: item['name'] for item in allows} | {key: item['name'] for key, item in people.items()}
         every = set(people) | {item['id'] for item in allows} | {who for _, who, _, _ in heard} | self.trusted()
+        mentions = [item for item in self.store.load('mentions') if item[0] > now - MENTION_HOURS * 3600]
+        every |= {who for _, _, who in mentions}
         whose = {number: who for _, who, number, _ in heard}
         lines = []
         for person in sorted(every - {self.settings.owner}, key=int):
@@ -3031,6 +3148,12 @@ class Wimsy:
                 said.append(f'allowed {ran(standing.allow["until"], when_markup)}')
             else:
                 said.append(standing.level)
+            last = max((when for when, _, who in mentions if who == person), default=None)
+            if last is not None and standing.level == 'stranger':
+                said.append(
+                    f'mentioned by {self.settings.identity.who}: their replies to those posts reach the session, '
+                    f'{WEIGHTS[MENTION_WEIGHT]} an hour, the last until {when_markup(last + MENTION_HOURS * 3600)}'
+                )
             if standing.weight:
                 weight = f'weight {standing.weight} ({WEIGHTS[standing.weight]} an hour'
                 said.append(weight + (f', set {ran(standing.until, when_markup)})' if standing.set else ')'))
@@ -3245,9 +3368,23 @@ class Wimsy:
         }
         return answer, {'text': text, 'meta': meta}
 
-    def deny(self, target, now):
+    def deny(self, target, name, now):
+        """under the state's lock: a person's allow taken back, and the hours they had to reply to the posts that
+        mentioned them ended"""
         items = self.in_force(now)
         before = next((item for item in items if item['id'] == target), None)
+        mentions = [item for item in self.store.load('mentions') if item[0] > now - MENTION_HOURS * 3600]
+        posts = sorted({number for _, number, who in mentions if who == target}, key=int)
+        if posts:
+            self.store.save('mentions', [item for item in mentions if item[2] != target])
+        ended = (
+            f'{len(posts)} post{"s" if len(posts) != 1 else ""} of {self.title} mentioned them ({", ".join(posts)}), '
+            "and their replies to them are a stranger's again"
+        )
+        if before is None and posts:
+            text = f'The owner denied {name} ({target}): {ended}'
+            meta = {'kind': 'notice', 'user': name, 'user_id': target, 'until': 'denied'}
+            return f'<@{target}> has no allow to take back; {ended}.', {'text': text, 'meta': meta}
         if before is None:
             if target in self.trusted():
                 return (
@@ -3266,6 +3403,8 @@ class Wimsy:
         )
         meta = {'kind': 'notice', 'user': name, 'user_id': target, 'until': 'denied'}
         answer = f'<@{target}> is not allowed anymore; it ran {ran(before["until"], when_markup)}.'
+        if posts:
+            text, answer = f'{text}; {ended}', f'{answer[:-1]}; {ended}.'
         return answer, {'text': text, 'meta': meta}
 
     def allowed_text(self):
@@ -3434,6 +3573,9 @@ class Wimsy:
                     after = message['id']
                     if heard(message['author']['id']) and not self.rejects(message):
                         found = view(message) | self.about(message, 'message', where=where)
+                        return {'channel': channel, 'message': found, 'left_out': left_out, 'after': after}
+                    if named is None and self.invited(message) and not self.rejects(message):
+                        found = view(message) | self.about(message, 'mentioned', where=where)
                         return {'channel': channel, 'message': found, 'left_out': left_out, 'after': after}
                     if message['author']['id'] != me:
                         left_out += 1
@@ -3934,6 +4076,8 @@ class Ear:
                 f"greet: a stranger's call in channel {channel} is only counted: the caller is iced until "
                 f'{utc(standing.ice["until"])}'
             )
+        elif level == 'stranger' and self.tools.mention_of(message) is not None:
+            self.admit(message, 'mentioned', level)  # no greeting: the post they reply to mentioned them
         elif level == 'stranger':
             if self.tools.settings.identity.greeting and self.calls(message):
                 self.greet(message)
@@ -3950,8 +4094,9 @@ class Ear:
             self.tell(message, 'message', quoted)
 
     def admit(self, message, kind, level):
-        """a message of a trusted or allowed person, or one the owner let through, told to the session when its
-        weight lets it reach the session, else only counted; a state file it cannot read stops it, said"""
+        """a message of a trusted or allowed person, one the owner let through, or a mentioned person's reply, told
+        to the session when its weight lets it reach the session, else only counted; a state file it cannot read stops
+        it, said"""
         if self.tools.store is None:  # a bot with no command weighs no one
             self.tell(message, kind)
             return
@@ -4341,7 +4486,14 @@ def tool_list(identity):
                 'oldest first. Returns JSON {"channel", "messages": [' + MESSAGE + '], "left_out", "after"}. Only the '
                 f"owner's messages, the listed users' and {me}'s own are given, or only those of the authors `from` "
                 f"names; and, without `from`, a stranger's message the owner let through: addressed to {me} with "
-                f'his :{WIMSY}: reaction on it, or one he replied to mentioning {me}. left_out counts the others, '
+                f'his :{WIMSY}: reaction on it, or one he replied to mentioning {me}'
+                + (
+                    f"; and the reply of someone a post of {me}'s mentioned, to that post and within {MENTION_HOURS} "
+                    'h of it'
+                    if identity.mentions
+                    else ''
+                )
+                + '. left_out counts the others, '
                 'and nothing else of them is given. "after" is the newest id read, to read on from. ' + where
             ),
             'inputSchema': {
@@ -4539,7 +4691,7 @@ def event_line(content, meta):
     """an event as one line a monitor shows its model whole: its kind, who and where, then its text, cut short to fit
     MONITOR_SHOWS bytes. A person's text is quoted, its own lines kept in one; the server's own has its lines joined"""
     kind = meta.get('kind', 'notice')
-    if kind in ('message', 'approved'):
+    if kind in ('message', 'approved', 'mentioned'):
         head = f'{kind}: {meta.get("author") or "?"} ({meta.get("author_id")}) in channel {meta.get("channel")}, '
         head += f'message {meta.get("message_id")}'
         for key, said in (('reply_to', 'replying to'), ('attachments', 'attachments')):
