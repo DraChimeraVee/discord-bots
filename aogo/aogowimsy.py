@@ -364,6 +364,8 @@ IMAGES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gi
 MOST_FILES = 4  # images a post carries; how big each may be is Discord's to say, in the owner's DMs first
 CDN = ('https://cdn.discordapp.com/', 'https://media.discordapp.net/')  # where attachments are fetched from
 MOST_SAVE = 64 << 20  # bytes of one attachment discord_attachments saves at most
+MOST_SAVE_RDC = 2 << 30  # a RenderDoc capture's (.rdc), which runs to hundreds of MB (DraVee, 2026-11-10)
+CHUNK = 1 << 20  # bytes an attachment is written in, so a capture never sits whole in memory
 POLL = 3.0  # seconds between two looks at a draft's reactions
 LOOK = 1.0  # seconds a wait sleeps at most before looking again at what the gateway brought
 MOST_WAIT = 3600  # seconds a tool waits at most
@@ -1199,6 +1201,38 @@ class Discord:
             except ValueError:
                 raise DiscordError(f'Discord answered {method} {path} with something that is not JSON') from None
 
+    def download_to(self, url, out, most):
+        """an attachment from Discord's CDN (or, in the tests, from where the API is), without the token, written to
+        out CHUNK bytes at a time; the bytes written. A DiscordError for one longer than most bytes or for the CDN; a
+        failed write raises the OSError of out"""
+        api = urllib.parse.urlsplit(self.api)
+        if not url.startswith(CDN) and not url.startswith(f'{api.scheme}://{api.netloc}/attachments/'):
+            raise DiscordError(
+                f'an attachment at {url}: {self.identity.title} fetches them from {" or ".join(CDN)} alone'
+            )
+        try:
+            got = urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': AGENT}), timeout=60)
+        except urllib.error.HTTPError as error:
+            error.close()
+            raise DiscordError(f"Discord's CDN answered {error.code} to {url}", error.code) from None
+        except OSError as error:
+            raise DiscordError(
+                f"Discord's CDN could not be reached for {url}: {getattr(error, 'reason', error)}"
+            ) from None
+        written = 0
+        with got:
+            while True:
+                try:
+                    chunk = got.read(CHUNK)
+                except OSError as error:
+                    raise DiscordError(f"Discord's CDN stopped sending {url} after {written} bytes: {error}") from None
+                if not chunk:
+                    return written
+                written += len(chunk)
+                if written > most:
+                    raise DiscordError(f"Discord's CDN gave more than {most} bytes for {url}")
+                out.write(chunk)
+
     def download(self, url, most=None):
         """an attachment's bytes from Discord's CDN (or, in the tests, from where the API is), without the token;
         a DiscordError for one longer than most bytes"""
@@ -1220,6 +1254,11 @@ class Discord:
             raise DiscordError(
                 f"Discord's CDN could not be reached for {url}: {getattr(error, 'reason', error)}"
             ) from None
+
+
+def most_saved(name):
+    """bytes discord_attachments saves of an attachment of this name at most: MOST_SAVE_RDC for a .rdc, else MOST_SAVE"""
+    return MOST_SAVE_RDC if str(name or '').lower().endswith('.rdc') else MOST_SAVE
 
 
 def multipart(body, files):
@@ -2863,26 +2902,25 @@ class Wimsy:
             entry = {'name': item.get('filename'), 'type': item.get('content_type'), 'size': size}
             entry.update({key: item[key] for key in ('width', 'height') if item.get(key)})
             path = folder / name
-            if isinstance(size, int) and size > MOST_SAVE:
-                entry['error'] = f'{size} bytes, more than the {MOST_SAVE} {self.title} saves of one attachment'
+            most = most_saved(item.get('filename'))
+            if isinstance(size, int) and size > most:
+                entry['error'] = f'{size} bytes, more than the {most} {self.title} saves of one attachment'
             elif isinstance(size, int) and path.is_file() and path.stat().st_size == size:
                 entry['path'] = str(path)  # saved by an earlier call: an attachment never changes
             else:
+                part = folder / f'.{name}.part'
                 try:
-                    data = self.discord.download(item['url'], most=MOST_SAVE)
+                    with open(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as out:
+                        written = self.discord.download_to(item['url'], out, most)
+                    os.replace(part, path)
                 except DiscordError as error:
+                    part.unlink(missing_ok=True)
                     entry['error'] = str(error)
+                except OSError as error:
+                    part.unlink(missing_ok=True)
+                    entry['error'] = f'{path} could not be written: {error.strerror or error}'
                 else:
-                    part = folder / f'.{name}.part'
-                    try:
-                        with open(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as out:
-                            out.write(data)
-                        os.replace(part, path)
-                    except OSError as error:
-                        part.unlink(missing_ok=True)
-                        entry['error'] = f'{path} could not be written: {error.strerror or error}'
-                    else:
-                        entry['path'], entry['size'] = str(path), len(data)
+                    entry['path'], entry['size'] = str(path), written
             saved.append(entry)
         return {'channel': channel, 'message': number, 'folder': str(folder), 'files': saved}
 
@@ -4543,7 +4581,8 @@ def tool_list(identity):
                 "stranger's the owner let through), fetched from Discord's CDN without the token. Returns JSON "
                 '{"channel", "message", "folder", "files": [{"name" (as Discord has it), "type", "size", "width" and '
                 '"height" (images), and "path" when saved or "error" saying why not}]}. One over '
-                f'{MOST_SAVE >> 20} MiB is not saved, and says so. A file saved before is not fetched again. ' + where
+                f'{MOST_SAVE >> 20} MiB ({MOST_SAVE_RDC >> 30} GiB for a RenderDoc .rdc) is not saved, and says so. A '
+                'file saved before is not fetched again. ' + where
             ),
             'inputSchema': {
                 'type': 'object',

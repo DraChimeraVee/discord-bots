@@ -1306,6 +1306,41 @@ class Attachments(WithDiscord):
         self.assertEqual(Path(ok['path']).read_bytes(), b'fits')
         self.assertEqual([r[1].rsplit('/', 1)[1] for r in self.cdn()], ['ok.txt'])  # the big one is never fetched
 
+    def test_a_renderdoc_capture_is_saved_past_the_cap_of_the_others(self):
+        for name in ('MOST_SAVE', 'MOST_SAVE_RDC', 'CHUNK'):
+            self.addCleanup(setattr, aw, name, getattr(aw, name))
+        aw.MOST_SAVE, aw.MOST_SAVE_RDC, aw.CHUNK = 20, 100, 7
+        number = self.carrying(
+            GENERAL,
+            OWNER,
+            [
+                ('frame.rdc', b'c' * 50, 'application/octet-stream'),
+                ('FRAME2.RDC', b'd' * 61, 'application/octet-stream'),
+                ('frame.png', b'p' * 50, 'image/png'),
+                ('huge.rdc', b'h' * 101, 'application/octet-stream'),
+            ],
+        )
+        got = self.tool('discord_attachments', channel=GENERAL, message=number)
+        rdc, upper, png, huge = got['files']
+        self.assertEqual(Path(rdc['path']).read_bytes(), b'c' * 50)
+        self.assertEqual((rdc['size'], upper['size']), (50, 61))
+        self.assertEqual(Path(upper['path']).read_bytes(), b'd' * 61)
+        self.assertEqual(png['error'], '50 bytes, more than the 20 AogoWimsy saves of one attachment')
+        self.assertEqual(huge['error'], '101 bytes, more than the 100 AogoWimsy saves of one attachment')
+        self.assertEqual(
+            sorted(p.name for p in (self.bot.files / GENERAL / number).iterdir()), ['FRAME2.RDC', 'frame.rdc']
+        )
+
+    def test_a_capture_with_no_size_is_capped_while_written_and_leaves_no_part(self):
+        for name in ('MOST_SAVE', 'MOST_SAVE_RDC', 'CHUNK'):
+            self.addCleanup(setattr, aw, name, getattr(aw, name))
+        aw.MOST_SAVE, aw.MOST_SAVE_RDC, aw.CHUNK = 4, 10, 3
+        number = self.carrying(GENERAL, OWNER, [('a.rdc', b'r' * 11, 'application/octet-stream')])
+        del self.fake.find(GENERAL, number)['attachments'][0]['size']
+        got = self.tool('discord_attachments', channel=GENERAL, message=number)
+        self.assertIn("Discord's CDN gave more than 10 bytes for", got['files'][0]['error'])
+        self.assertEqual(list((self.bot.files / GENERAL / number).iterdir()), [])
+
     def test_a_size_discord_did_not_give_is_capped_while_reading(self):
         self.addCleanup(setattr, aw, 'MOST_SAVE', aw.MOST_SAVE)
         aw.MOST_SAVE = 4
