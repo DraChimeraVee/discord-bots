@@ -4,11 +4,13 @@ fake Discord REST served on 127.0.0.1 with a clock that only moves when a tool w
 pushes to the session, and the gateway client itself against a fake WebSocket gateway on 127.0.0.1"""
 
 import base64
+import contextlib
 import email.parser
 import email.policy
 import fcntl
 import hashlib
 import http.server
+import io
 import json
 import os
 import queue
@@ -3695,6 +3697,7 @@ class Statused(Owned):
         self.addCleanup(folder.cleanup)
         self.home = Path(folder.name)
         self.bot.statusline = self.home / 'usage' / 'statusline.json'
+        self.bot.claude = None  # never the Claude Code that may run these tests: a test that needs one sets it
         self.transcript = self.home / 'projects' / 'here' / 'session-1.jsonl'
         self.use(OWNER, 'allow', user=STRANGER, time='perm')
         self.pushes.clear()
@@ -3907,6 +3910,30 @@ class Direct(Statused):
         self.assertEqual(self.direct(), self.drafted(said))
         self.bot.session = '../session-1'  # an id that is no file name: the account's alone
         self.assertEqual(self.bot.status_file(), self.bot.statusline)
+
+    def test_after_a_clear_the_status_line_file_its_claude_code_marked_is_followed_and_the_move_said(self):
+        self.bot.session, self.bot.claude = 'session-1', 4242
+        before = self.bot.statusline.with_name('statusline-session-1.json')
+        self.status(session='session-1', age=1800, path=before, claude_pid=4242)  # it stopped at the /clear
+        after = self.bot.statusline.with_name('statusline-session-2.json')
+        self.status(week=40, session='session-2', path=after, claude_pid=4242)
+        other = self.bot.statusline.with_name('statusline-session-3.json')
+        self.status(week=90, session='session-3', path=other, claude_pid=777, age=0)  # another Claude Code's, newer
+        self.status(week=90, session='session-3', age=0)  # the account's: the other refreshed last
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            self.assertEqual(self.bot.status_file(), after)
+            self.assertEqual(self.bot.pace(self.now), aw.Pace(30, 'quota 40%'))
+            self.assertEqual(self.direct()['direct'], 'interval')
+        self.assertEqual(self.bot.session, 'session-2')
+        moved = f'{self.bot.title}: Claude Code 4242 runs session session-2 now, not session-1: the interval reads {after}\n'
+        self.assertEqual(said.getvalue(), moved)  # said once, at the move
+        self.bot.claude = None  # no Claude Code found up the parents: its own session's file, as before
+        self.assertEqual(self.bot.status_file(), after)
+        self.bot.claude = 4242
+        after.write_text('{"session_id": ')  # mid-write: not claimed, and the session's own file is that one
+        self.assertEqual(self.bot.status_file(), after)
+        self.assertTrue(self.direct().startswith(f'this text goes as a draft, not direct: {after} is not JSON ('))
 
     def test_the_pre_harness_keeps_a_text_from_going_direct_naming_each_rule_and_where_never_the_text(self):
         asked = self.fake.say(GENERAL, OWNER, 'send me the logs')
@@ -5129,6 +5156,33 @@ class Stdio(unittest.TestCase):
         self.assertIn('unrecognized arguments: --bogus', proc.stderr.read().decode())
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             stream.close()
+
+
+class ClaudeProcess(unittest.TestCase):
+    """claude_process: the Claude Code up a server's parents, from a /proc of the test's own"""
+
+    def test_the_nearest_claude_up_the_parents_and_none_without_one(self):
+        folder = tempfile.TemporaryDirectory(prefix='aogowimsy-proc-')
+        self.addCleanup(folder.cleanup)
+        proc = Path(folder.name)
+
+        def made(pid, name, parent):
+            (proc / str(pid)).mkdir()
+            (proc / str(pid) / 'stat').write_text(f'{pid} ({name}) S {parent} 1 1 0 -1\n')
+
+        made(30, 'python3', 20)
+        made(20, 'sh', 10)
+        made(10, 'claude', 1)
+        made(40, 'a (b) c', 30)
+        made(50, 'bash', 60)
+        made(70, 'loop', 71)
+        made(71, 'loop', 70)
+        self.assertEqual(aw.claude_process(30, proc), 10)
+        self.assertEqual(aw.claude_process(10, proc), 10)
+        self.assertEqual(aw.claude_process(40, proc), 10)  # a name with spaces and parentheses
+        self.assertIsNone(aw.claude_process(50, proc))  # its parent is gone
+        self.assertIsNone(aw.claude_process(70, proc))  # a cycle ends
+        self.assertIsNone(aw.claude_process(1, proc))
 
 
 if __name__ == '__main__':
