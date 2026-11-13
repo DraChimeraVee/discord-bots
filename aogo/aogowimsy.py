@@ -93,7 +93,8 @@ in the channels <PREFIX>_CHANNELS lists and their threads, or in every one Disco
 and in the owner's DMs with it. A session's text gets out through the owner's check mark, or, for AogoWimsy with
 <PREFIX>_DIRECT 1, as a direct post its rules let: a reply to the owner's message or a trusted person's, REPLIES each
 (in DMs, the owner's alone), and the rest once an interval (pace), from Claude Code's status line (status_file:
-this session's statusline-<id>.json, else the account's statusline.json; STATUS_FRESH at most):
+the newest statusline-<id>.json its Claude Code marked, so a /clear moves with it, else this session's, else
+the account's statusline.json; STATUS_FRESH at most):
 <PREFIX>_DIRECT_MINUTES doubled for the quota, the context and the agents high each, halved with quota to spare,
 within DIRECT_RANGE, none at QUOTA_STOP. A direct text passes the pre-harness's
 outbound rules and the bot's own token first; a refusal is an error naming the rule, and the session sends a draft.
@@ -1335,6 +1336,26 @@ def runtime_folder(server, environ=None):
     return xdg_folder('XDG_RUNTIME_DIR', '.local/state', server, environ)
 
 
+def claude_process(pid, proc=Path('/proc')):
+    """the nearest process named claude from pid up, pid itself included: the Claude Code that started this server
+    and runs its status line; None when there is none or /proc cannot tell"""
+    seen = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        try:
+            text = (proc / str(pid) / 'stat').read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            return None
+        # the name sits in parentheses and may hold spaces or parentheses itself: the last ")" ends it
+        name, fields = text[text.find('(') + 1 : text.rfind(')')], text[text.rfind(')') + 1 :].split()
+        if name == 'claude':
+            return pid
+        if len(fields) < 2 or not fields[1].isdigit():
+            return None
+        pid = int(fields[1])
+    return None
+
+
 def private_folder(folder):
     """folder made, 700, and its parents as the user's umask has them"""
     folder.parent.mkdir(parents=True, exist_ok=True)
@@ -1958,6 +1979,9 @@ class Wimsy:
         config = environ.get('CLAUDE_CONFIG_DIR') or str(Path.home() / '.claude')
         self.statusline = Path(config) / 'usage' / 'statusline.json'
         self.session = environ.get('CLAUDE_CODE_SESSION_ID') or None
+        # a /clear gives the session a new id while CLAUDE_CODE_SESSION_ID keeps the first: the status line marks its
+        # file with the Claude Code that runs it (claude_pid), and status_file follows this one's
+        self.claude = claude_process(os.getppid())
         self.title = settings.identity.title
         self.hub = hub or Hub()
         self.files = Path(files) if files else saves_folder(settings.identity.server)  # where discord_attachments saves
@@ -2387,10 +2411,45 @@ class Wimsy:
             self.discord('PUT', f'/channels/{dm}/messages/{draft}/reactions/{urllib.parse.quote(emoji)}/@me')
         return self.verdict(draft, wait, cancelled, progress)
 
+    def follow_session(self):
+        """the newest status line file of this server's Claude Code, by the claude_pid the status line writes in it,
+        or None; its session_id becomes this server's session, said once on stderr when it moves (a /clear, a resume)"""
+        if not self.claude:
+            return None
+        named = self.session and re.fullmatch(r'[A-Za-z0-9_-]+', self.session)
+        newest, own = None, self.statusline.with_name(f'statusline-{self.session}.json') if named else None
+        for path in self.statusline.parent.glob('statusline-*.json'):
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                when = path.stat().st_mtime
+            except (OSError, ValueError):
+                if path == own:
+                    return path  # its own session's file is broken: pace names it, never an older session's
+                continue  # another session's file, gone or broken: not this Claude Code's to claim
+            ours = isinstance(data, dict) and data.get('claude_pid') == self.claude
+            if ours and isinstance(data.get('session_id'), str) and (newest is None or when > newest[0]):
+                newest = (when, path, data['session_id'])
+        if newest is None:
+            return None
+        _, path, session = newest
+        if session != self.session:
+            print(
+                f'{self.title}: Claude Code {self.claude} runs session {session} now, not {self.session}: '
+                f'the interval reads {path}',
+                file=sys.stderr,
+                flush=True,
+            )
+            self.session = session
+        return path
+
     def status_file(self):
-        """this session's statusline-<session id>.json beside the account's statusline.json, which the status line
-        writes for each session; the account's, which the last session to refresh writes, when there is none (or the
-        server knows no session id)"""
+        """the newest statusline-<session id>.json the status line marked with this server's Claude Code (claude_pid),
+        whose session this one becomes; else this session's statusline-<session id>.json beside the account's
+        statusline.json, which the status line writes for each session; the account's, which the last session to
+        refresh writes, when there is none (or the server knows no session id)"""
+        followed = self.follow_session()
+        if followed:
+            return followed
         if self.session and re.fullmatch(r'[A-Za-z0-9_-]+', self.session):
             mine = self.statusline.with_name(f'statusline-{self.session}.json')
             if mine.exists():
