@@ -37,7 +37,7 @@ WebSocket of its own: heartbeats, resume after a drop, a fresh session when Disc
 
 | Tool | What it does |
 |---|---|
-| `discord_post(channel, text, reply_to, wait=300, files, direct)` | sends the text as a draft to its owner's DMs with AogoWimsy (the text and its images, `files`: 1 to 4 png, jpg, gif or webp by absolute path, how big each may be Discord's to say; under it a card with the channel's name and id and, for a reply, the message it answers as a link), with a check mark and a cross, then waits up to `wait` s for its owner's reaction, looking every 3 s: the check mark posts the text as it is, with the draft's images fetched from Discord's CDN (without the token), pinging no one, and edits the card to link the post; the cross edits it to say it was not sent; no answer returns the draft's id, still waiting. Another person's reaction counts for nothing. With `direct` true it posts at once, with no draft, where the rules below let it, and returns the post's link and how many replies to that message are left, or when the next interval post may go; otherwise it is an error naming the rule, and the session sends the draft |
+| `discord_post(channel, text, reply_to, wait=300, files, direct)` | sends the text as a draft to its owner's DMs with AogoWimsy (the text and its files, `files`: 1 to 4 images (png, jpg, gif, webp) or sounds (ogg, opus, mp3, wav, flac, m4a) by absolute path, how big each may be Discord's to say; under it a card with the channel's name and id and, for a reply, the message it answers as a link), with a check mark and a cross, then waits up to `wait` s for its owner's reaction, looking every 3 s: the check mark posts the text as it is, with the draft's images fetched from Discord's CDN (without the token), pinging no one, and edits the card to link the post; the cross edits it to say it was not sent; no answer returns the draft's id, still waiting. Another person's reaction counts for nothing. With `direct` true it posts at once, with no draft, where the rules below let it, and returns the post's link and how many replies to that message are left, or when the next interval post may go; otherwise it is an error naming the rule, and the session sends the draft |
 | `discord_post_status(draft, wait=300)` | the same wait, on a draft that came back still waiting; a draft sent or refused answers that again, and is never posted twice |
 | `discord_read(channel, after, limit=50, from)` | the first `limit` messages after an id, or the newest `limit` without one, oldest first: id, author, time, text, the message it answers, attachments by name, whether it is a stranger's its owner let through, and what each channel event says of its author and of how to answer (below); a message the pre-harness rejects, or of someone iced or muted, is left out |
 | `discord_wait(channel, after, wait=600, from)` | the first message after an id from the owner, someone he trusts or allowed, as the gateway brings it, with the same fields; what came before it began listening, from REST |
@@ -144,7 +144,7 @@ direct post of the last day, so they share the caps and the interval), `admins.j
 `tones.json` (each channel's tone the owner set, where it differs from the one it has without it), `flags.json` (the
 notes to the owner said once), `mode.json` and `approver.json` (the mode and the approver the owner set, and until
 when), `queue.json` (each direct post queued for its turn: its text, where it goes, the pid of the server that queued
-it), `held.json` (each post held for casa: its text, where it goes, its images' paths) and `gone.json` (how each queued
+it), `held.json` (each post held for casa: its text, where it goes, its files' paths) and `gone.json` (how each queued
 or held post of the last day left its file: posted, a draft, taken back; what `discord_cancel` says); and `line`, the one
 line the owner's status line shows (below). A file there it did not write stops what reads it (the greetings, the help, the allows or
 the commands), and each call or use then wakes the session as an `error` naming the file and what is wrong in it (a
@@ -458,7 +458,7 @@ One application each, in the Developer Portal:
    signature, so the profile says who writes).
 3. Invite (OAuth2, scopes `bot` and, for AogoWimsy's `/aogo`, `applications.commands`), with only what it needs:
    - AogoWimsy and XujiWimsy: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add
-     Reactions (`discord_react`), Attach Files (`discord_post`'s images; the drafts, their card and their reactions
+     Reactions (`discord_react`), Attach Files (`discord_post`'s images and sounds; the drafts, their card and their reactions
      are in DMs, which need none): `permissions=274878008384`. AogoWimsy: a custom emoji of another server than the
      message's also needs Use External Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070971030592`
      with it.

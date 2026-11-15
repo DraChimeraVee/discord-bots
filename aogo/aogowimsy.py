@@ -130,7 +130,7 @@ of the last day; mentions.json, the time, the post's id and the person's id of e
 MENTION_HOURS hours; admins.json, each server's admin role; tones.json, each channel's tone the owner set where it
 differs from the one it has without it; flags.json, the notes to the owner said once; mode.json, the mode the owner set
 and until when; approver.json, the approver and until when; queue.json, each direct post queued for its turn (its text,
-where it goes and the server's pid); held.json, each post held for casa (its text, where it goes and its images' paths);
+where it goes and the server's pid); held.json, each post held for casa (its text, where it goes and its files' paths);
 gone.json, how each queued or held post of the last day left its file (posted, a draft, taken back), for discord_cancel;
 and LINE_FILE, one line for the owner's status line (the mode, its end and the approver), written at the start, at each
 change and again each LINE_FRESH. A draft waiting is a message in the owner's DMs, read again at each look, and stderr
@@ -436,7 +436,17 @@ CLAUDE_CODE = 'claude-code'  # the clientInfo name Claude Code's MCP client give
 NAME = AOGO.server  # stderr's prefix: main sets the one it runs
 LIMIT = 2000  # a Discord message's letters
 IMAGES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp'}
-MOST_FILES = 4  # images a post carries; how big each may be is Discord's to say, in the owner's DMs first
+# what Discord plays in place; an .opus file is Ogg Opus, which Discord takes as audio/ogg
+SOUNDS = {
+    '.ogg': 'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.flac': 'audio/flac',
+    '.m4a': 'audio/mp4',
+}
+POSTABLE = IMAGES | SOUNDS  # what discord_post's files may be
+MOST_FILES = 4  # files a post carries; how big each may be is Discord's to say, in the owner's DMs first
 CDN = ('https://cdn.discordapp.com/', 'https://media.discordapp.net/')  # where attachments are fetched from
 MOST_SAVE = 64 << 20  # bytes of one attachment discord_attachments saves at most
 MOST_SAVE_RDC = 2 << 30  # a RenderDoc capture's (.rdc), which runs to hundreds of MB (DraVee, 2026-11-10)
@@ -450,7 +460,7 @@ MOST_RETRY = 60.0  # seconds a 429 may ask to wait
 EMOJI_FOLDER = '~/WorkDir/ScarletNX/wimsy-dist/emoji'  # the owner's clone of wimsy-dist: <name>.png of each of DRAWN
 MOST_EMOJI = 256 << 10  # bytes of an emoji's image Discord takes at most
 CREATE_EXPRESSIONS = 1 << 43  # the permission POST /guilds/{guild}/emojis needs
-ATTACH_FILES = 1 << 15  # the permission a post with images (discord_post's files) needs
+ATTACH_FILES = 1 << 15  # the permission a post with files (discord_post's images and sounds) needs
 # The permissions of the README's invite: View Channels, Send Messages, Add Reactions, Read Message History, Send
 # Messages in Threads, Attach Files
 INVITE = 1 << 10 | 1 << 11 | 1 << 6 | 1 << 16 | 1 << 38 | ATTACH_FILES
@@ -1385,26 +1395,29 @@ def multipart(body, files):
     return b''.join(parts), f'multipart/form-data; boundary={boundary}'
 
 
-def images(value, title):
+def attached(value, title):
     """the files discord_post was given, read: [(name, bytes, type)]; None for none; Refused naming what is wrong"""
     if value is None:
         return None
-    kinds = ', '.join(kind[1:] for kind in IMAGES)
+    kinds = ', '.join(kind[1:] for kind in POSTABLE)
     if not isinstance(value, list):
-        raise Refused(f'files is a JSON {kind_of(value)}, not a list of 1 to {MOST_FILES} absolute paths of images')
+        raise Refused(
+            f'files is a JSON {kind_of(value)}, not a list of 1 to {MOST_FILES} absolute paths of images or sounds'
+        )
     if not value:
-        raise Refused(f'files is empty: 1 to {MOST_FILES} absolute paths of images ({kinds})')
+        raise Refused(f'files is empty: 1 to {MOST_FILES} absolute paths of images or sounds ({kinds})')
     if len(value) > MOST_FILES:
-        raise Refused(f'files names {len(value)} files: a post carries 1 to {MOST_FILES} images')
+        raise Refused(f'files names {len(value)} files: a post carries 1 to {MOST_FILES}')
     found = []
     for place, item in enumerate(value, 1):
         if not isinstance(item, str) or not os.path.isabs(item):
             raise Refused(f'files item {place} is {shown(item)}, not an absolute path')
         path = Path(item)
-        kind = IMAGES.get(path.suffix.lower())
+        kind = POSTABLE.get(path.suffix.lower())
         if not kind:
             raise Refused(
-                f'files item {place} is a {path.suffix or "file without a suffix"}: {title} posts images ({kinds})'
+                f'files item {place} is a {path.suffix or "file without a suffix"}: {title} posts images and sounds '
+                f'({kinds})'
             )
         try:
             data = path.read_bytes()
@@ -2742,7 +2755,7 @@ class Wimsy:
         if direct:
             return self.post_direct(channel, text, reply_to, args)
         wait = whole(args.get('wait'), 'wait', 300, 0, MOST_WAIT)
-        files = images(args.get('files'), self.title)
+        files = attached(args.get('files'), self.title)
         where = self.where(channel, reading=False)
         if reply_to:
             self.discord('GET', f'/channels/{channel}/messages/{reply_to}')
@@ -3262,7 +3275,7 @@ class Wimsy:
                 where = self.where(item['channel'], reading=False)
                 if item['reply_to']:
                     self.discord('GET', f'/channels/{item["channel"]}/messages/{item["reply_to"]}')
-                files = images(item['files'] or None, self.title)
+                files = attached(item['files'] or None, self.title)
                 draft, copy = self.draft(where, item['text'], item['reply_to'], files, now, quiet, approver is not None)
             except (DiscordError, Refused) as error:
                 done.append((item, None, None, None, str(error)))
@@ -5552,7 +5565,7 @@ def tool_list(identity):
             'name': 'discord_post',
             'description': (
                 "Post a message on Discord as a draft the owner approves first. The draft goes to the owner's DMs "
-                f'with {me} (the text and its images, and under it where it goes) with {YES} and {NO}: only the '
+                f'with {me} (the text and its files, and under it where it goes) with {YES} and {NO}: only the '
                 f"owner's {YES} posts it, as it is, pinging no one; another person's reaction counts for nothing. It "
                 'posts in the '
                 f'channels {channels} lists and their threads, or in any Discord lets the bot see when it lists none. '
@@ -5581,7 +5594,7 @@ def tool_list(identity):
                         'minItems': 1,
                         'maxItems': MOST_FILES,
                         'description': (
-                            f'absolute paths of 1 to {MOST_FILES} images ({", ".join(k[1:] for k in IMAGES)}) posted '
+                            f'absolute paths of 1 to {MOST_FILES} images or sounds ({", ".join(k[1:] for k in POSTABLE)}) posted '
                             "under the text: the draft carries them, and the post sends the draft's"
                         ),
                     },
