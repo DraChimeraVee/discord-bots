@@ -2624,7 +2624,8 @@ OWNERS_HELP = (
     '/aogo mode casa|trabalho|dormindo [time]: where you are, which sets how my posts go; time as 30m, 8h or 1d (7d at '
     'most), until you change it without one; casa by default\n'
     '/aogo approver on user [time], /aogo approver off: someone who gets my drafts in their DMs too, and the first '
-    'answer, yours or theirs, decides; time 2h, 1d or 7d, 1d without one'
+    'answer, yours or theirs, decides; time 2h, 1d or 7d, 1d without one\n'
+    'A post I queued or held for casa I take back before it goes when you ask me (discord_cancel)'
 )
 # /aogo's subcommands, as a log and an answer name them
 SUBS = 'help, allow, deny, allowed, trust, untrust, weight, unfreeze, admins, people, tone, mode, approver'
@@ -4761,6 +4762,158 @@ class Approver(Statused):
         self.assertEqual(json.loads((self.state / 'held.json').read_text()), {'held': []})
 
 
+class Cancel(Statused):
+    """discord_cancel: a post queued for its turn or held for casa, taken back by its mark before it goes, under the
+    state's lock; what left already, and how, said naming the mark (DraVee, 2026-11-15, after 5 duplicates and a
+    wrong answer went out of the queue)"""
+
+    def setUp(self):
+        super().setUp()
+        self.use(OWNER, 'mode', mode='trabalho')
+        self.status()
+        self.start = self.now
+        self.direct(text='first')  # it takes the interval's turn: what follows waits in the queue
+        self.pushes.clear()
+        self.sent.clear()
+
+    def told(self):
+        """the notices the server pushed into its session, as content and meta"""
+        return [line['params'] for line in self.sent if line.get('method') == aw.CHANNEL_PUSH]
+
+    def turn(self):
+        self.now += 600
+        self.status()
+        self.ear.tick()
+
+    def test_a_queued_post_is_taken_back_never_goes_and_the_session_is_told(self):
+        long = 'a wrong answer, ' * 10
+        theirs = self.fake.say(GENERAL, STRANGER, 'any news?')
+        wrong = self.direct(text=long, reply_to=theirs)
+        right = self.direct(text='the right one')
+        got = self.tool('discord_cancel', mark=wrong['mark'])
+        text = ' '.join(long.split())[:77] + '...'
+        self.assertEqual(
+            got,
+            {
+                'status': 'cancelled',
+                'mark': wrong['mark'],
+                'was': 'queued',
+                'channel': GENERAL,
+                'text': text,
+                'since': aw.utc(self.start),
+            },
+        )
+        said = (
+            f'The session took back the post queued at {aw.utc(self.start)} for channel {GENERAL} (mark '
+            f'{wrong["mark"]}): "{text}"; it goes nowhere now'
+        )
+        meta = {'kind': 'notice', 'mark': wrong['mark'], 'cancelled': 'queued', 'channel': GENERAL}
+        self.assertEqual(self.told(), [{'content': said, 'meta': meta}])
+        queue = json.loads((self.state / 'queue.json').read_text())['queue']
+        self.assertEqual([item['mark'] for item in queue], [right['mark']])
+        self.assertIn(f'discord_cancel: a queued post for channel {GENERAL} taken back', self.logs)
+        self.assertNotIn('wrong answer', ' '.join(self.logs))
+        self.turn()  # the one left takes the first turn
+        posted = self.fake.last(GENERAL)
+        self.assertEqual(posted['content'], 'the right one')
+        self.turn()
+        self.assertEqual([m['content'] for m in self.fake.messages[GENERAL]], ['first', 'any news?', 'the right one'])
+        self.assertEqual(
+            self.error('discord_cancel', mark=wrong['mark']),
+            f'mark {wrong["mark"]} was taken back already, at {aw.hour_minute(self.start)} UTC',
+        )
+        went = f'https://discord.com/channels/{GUILD}/{GENERAL}/{posted["id"]}'
+        self.assertEqual(
+            self.error('discord_cancel', mark=right['mark']),
+            f'mark {right["mark"]} went already, at {aw.hour_minute(self.start + 600)} UTC: {went}',
+        )
+        self.assertEqual(len(self.told()), 1)  # a refusal changes nothing, and tells only the asker
+
+    def test_a_held_post_is_taken_back_and_casa_makes_no_draft_of_it(self):
+        held = self.tool('discord_post', channel=GENERAL, text='held, then not wanted')
+        other = self.tool('discord_post', channel=HELP, text='held and wanted')
+        got = self.tool('discord_cancel', mark=held['mark'])
+        self.assertEqual((got['was'], got['text'], got['channel']), ('held', 'held, then not wanted', GENERAL))
+        self.assertEqual(self.told()[0]['meta']['cancelled'], 'held')
+        self.use(OWNER, 'mode', mode='casa')
+        [draft] = [message for message in self.fake.messages[DM] if message['author'] == BOT]
+        self.assertEqual(draft['content'], 'held and wanted')
+        self.assertEqual(
+            self.error('discord_cancel', mark=other['mark']),
+            f'mark {other["mark"]} left the held posts at {aw.hour_minute(self.now)} UTC as draft '
+            f'https://discord.com/channels/@me/{DM}/{draft["id"]}: the {NO} on it drops it',
+        )
+        self.assertEqual(json.loads((self.state / 'held.json').read_text()), {'held': []})
+
+    def test_a_mark_that_is_none_or_that_no_post_had_is_refused_naming_it(self):
+        self.assertEqual(
+            self.error('discord_cancel', mark='xyz'),
+            'mark is "xyz", not a mark discord_post gives (32 letters of 0-9 and a-f)',
+        )
+        unknown = 'f' * 32
+        self.assertEqual(
+            self.error('discord_cancel', mark=unknown),
+            f'mark {unknown} is neither queued nor held, and no post of the last 24 h had it: it is not one '
+            'discord_post gave, or it left a day ago or more',
+        )
+        self.assertIn('discord_cancel needs mark', self.error('discord_cancel'))
+        self.assertIn('discord_cancel has no argument "x"', self.error('discord_cancel', mark=unknown, x=1))
+        refused = self.direct(text='refused by Discord')
+        route = ('POST', f'/channels/{GENERAL}/messages')
+        self.fake.fail[route] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        self.turn()
+        del self.fake.fail[route]
+        self.assertEqual(
+            self.error('discord_cancel', mark=refused['mark']),
+            f'mark {refused["mark"]} left the queue at {aw.hour_minute(self.now)} UTC without going, as Discord '
+            'refused it (the session was told why)',
+        )
+        self.now += 24 * 3600  # a day on, what left is forgotten
+        self.assertTrue(self.error('discord_cancel', mark=refused['mark']).endswith('or it left a day ago or more'))
+        self.assertEqual(self.told(), [])
+
+    def test_two_servers_one_takes_it_back_and_the_others_turn_does_not_post_it_nor_one_in_flight(self):
+        other = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
+        other.store.now, other.statusline, other.claude = self.bot.store.now, self.bot.statusline, None
+        server = self.started_server(other)
+
+        def cancel(mark):
+            params = {'name': 'discord_cancel', 'arguments': {'mark': mark}}
+            result = server.handle({'jsonrpc': '2.0', 'id': 8, 'method': 'tools/call', 'params': params})['result']
+            text = result['content'][0]['text']
+            return text if result['isError'] else json.loads(text)
+
+        queued = self.direct(text='queued by this session')
+        self.assertEqual(cancel(queued['mark'])['status'], 'cancelled')  # another session's server takes it back
+        self.assertEqual(
+            self.error('discord_cancel', mark=queued['mark']),
+            f'mark {queued["mark"]} was taken back already, at {aw.hour_minute(self.now)} UTC',
+        )
+        self.turn()  # this server's turn finds it gone
+        self.assertNotIn('queued by this session', [m['content'] for m in self.fake.messages[GENERAL]])
+        self.direct(text='takes the turn')
+        flying = self.direct(text='in flight')
+        asked, where = [], self.bot.where
+
+        def asking(channel, reading):  # the other server asks while this one posts it
+            asked.append(cancel(flying['mark']))
+            return where(channel, reading=reading)
+
+        self.bot.where = asking
+        self.turn()
+        posting = f'is being posted now, its turn come at {aw.hour_minute(self.now)} UTC: it cannot be taken back'
+        self.assertEqual(asked, [f'mark {flying["mark"]} {posting}'])
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'in flight')
+        held = self.tool('discord_post', channel=GENERAL, text='held while he is away')
+        asked.clear()
+        self.bot.where = lambda channel, reading: asked.append(cancel(held['mark'])) or where(channel, reading=reading)
+        self.use(OWNER, 'mode', mode='casa')
+        releasing = (
+            f'is being made a draft now, since {aw.hour_minute(self.now)} UTC: once it is, the {NO} on it drops it'
+        )
+        self.assertEqual(asked, [f'mark {held["mark"]} {releasing}'])
+
+
 class StatusLine(Statused):
     """the state folder's line for the owner's status line: the mode, its end and the approver"""
 
@@ -5341,11 +5494,11 @@ class Instructions(WithDiscord):
         self.assertLess(said.index(sentence) + len(sentence), CLAUDE_SHOWS)
         modes = (
             '/aogo mode says where the owner is (a notice at each change): casa (home), as above; trabalho (work): the '
-            'interval 10 min, 20 with the quota or the context high; a direct post it holds back is queued for its '
-            'turn (status "queued" says when, kind="queued" once it went or failed); a post without direct is held for '
-            'casa (status "held"), or with an approver is their draft at once; dormindo (asleep): as trabalho, and what '
-            'was held reaches him in one summary. /aogo approver: someone whose DMs get each draft too; the first '
-            'answer, his or theirs, decides. '
+            'interval 10 min, 20 with quota or context high; a direct post it holds back is queued for its turn '
+            '(status "queued" says when, kind="queued" once it went or failed); a post without direct is held for casa '
+            '(status "held"), or with an approver is their draft at once; discord_cancel takes either back by its '
+            'mark; dormindo (asleep): as trabalho, and what was held reaches him in one summary. /aogo approver: whose '
+            'DMs get each draft too, the first answer deciding. '
         )
         self.assertLess(said.index(modes) + len(modes), CLAUDE_SHOWS)  # the session reads where the owner is
         self.assertIn('gets at once, with no draft', said[CLAUDE_SHOWS:])  # what it is told nothing of comes after
