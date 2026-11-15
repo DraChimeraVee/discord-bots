@@ -218,8 +218,8 @@ check mark lets out:
 | Mode | The interval | A direct post past it | A post without direct (a draft) |
 |---|---|---|---|
 | `casa` (home, the default) | as above: 30 min, doubled for the quota, the context and the agents high | refused, naming when the next goes: the session sends a draft | a draft in his DMs, at once |
-| `trabalho` (work) | 10 min, 20 with the quota or the context high; the agents not counted; none at 95% quota | queued: `discord_post` answers `"status": "queued"` and when it goes at the soonest, and it goes direct at its turn | held until he is home (`"status": "held"`), then a draft in his DMs |
-| `dormindo` (asleep) | as `trabalho` | as `trabalho` | held until he is home, then drafts that wake no one and one summary that does |
+| `trabalho` (work) | 10 min, 20 with the quota or the context high; the agents not counted; none at 95% quota | queued: `discord_post` answers `"status": "queued"` and when it goes at the soonest, and it goes direct at its turn | with an approver, their draft at once, his silent; else held until he is home (`"status": "held"`), then a draft in his DMs |
+| `dormindo` (asleep) | as `trabalho` | as `trabalho` | with an approver, their draft at once, his silent; else held until he is home, then drafts that wake no one and one summary that does |
 
 A mode set for a time runs that long, then `casa`; the session is told when it runs out. Once he is home (he sets
 `casa`, or a mode's time runs out), the first server to look makes every held post a draft, in his DMs and the
@@ -241,6 +241,13 @@ their answer on a copy counts no more, which that copy then says, and new drafts
 else: no trust, no weight, no command. A copy Discord refuses (their DMs closed) is said in `discord_post`'s answer
 (`approver`), and the owner alone answers that draft. The approver's answers are heard by the server that made the
 draft, as the owner's are; another waits for `discord_post_status`.
+
+The approver is for when he is away (DraVee, 2026-11-15: "o aprovador e para quando ele esta fora"): in `trabalho` and
+`dormindo`, with an approver in force, a post without direct (a reply to someone a post only mentioned, a stranger's, a
+pre-harness hit) is a draft at once, its copy in their DMs waking them and his draft silent, his check mark counting too
+if he sees it; what was held goes to them the same way as soon as one is set (or the mode changes with one in force).
+The copy goes first: one their DMs refuse leaves the post held (`"status": "held"` with `approver` saying why) and no
+draft behind, and the ear tries again at each look, the error said once. With no approver, it is held as above.
 
 The owner's status line shows the mode (DraVee, 2026-11-15: "deixe disponivel pra mim ver na barra junto dos status da
 cpu e gpu"): the state folder's `line` holds `aogo: trabalho ate 23:00, aprova Liz ate 16/11 14:07` (the mode, its end
@@ -421,7 +428,8 @@ restart, the notice, an unreadable file or channel said in `tone`; `/aogo mode`:
 named, a restart, its end told once, the interval away from home, the queue (its turn, a refused post giving its turn
 and text back, a stopped server's queue taken over), the held posts (a draft once home, one summary and silent drafts
 after sleep), a file it cannot read; `/aogo approver`: the copy, either check mark first, the cross, its end, a copy
-Discord refuses; the status line's file), and its gateway client against a fake gateway
+Discord refuses, away from home their draft at once with his silent and a refused copy leaving the post held; the status
+line's file), and its gateway client against a fake gateway
 on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the close codes that stop it, pings, messages in frames), and
 that lines from several threads never mix on stdout; XujiWimsy's env file and keys (the other bot's refused, and its
 example AogoWimsy's in its names), its server, instructions and tools in its own names (no drawn emoji: the unicode ones

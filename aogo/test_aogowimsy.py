@@ -4408,7 +4408,7 @@ class Modes(Statused):
         self.assertEqual(self.fake.messages[DM], [])  # no draft while he is at work
         self.assertEqual(
             self.error('discord_post', channel=GENERAL, text='x', wait=10),
-            "wait is for the owner's answer to a draft, and in mode trabalho none is made now: take it out",
+            'wait is for an answer to a draft, and in mode trabalho, with no approver, none is made now: take it out',
         )
         let_through = self.heard(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
         self.reacted(GENERAL, let_through, WIMSY, OWNER)
@@ -4548,11 +4548,13 @@ class Approver(Statused):
         self.assertEqual(
             self.use(OWNER, 'approver on', user=FRIEND, time='2h'),
             f'<@{FRIEND}> approves your drafts too, until <t:{until}:f> (<t:{until}:R>): each draft goes to their DMs '
-            'as well, and the first answer, yours or theirs, decides; nothing else of theirs changes. It was no one.',
+            'as well, and the first answer, yours or theirs, decides; away from home (trabalho, dormindo) what waits '
+            'for a check mark goes to them at once, yours silent; nothing else of theirs changes. It was no one.',
         )
         text = (
             f'The owner made friend ({FRIEND}) an approver until {aw.utc(until)} (2 hours): each draft goes to their '
-            'DMs too, and the first answer, his or theirs, decides; nothing else of theirs changes. It was no one.'
+            'DMs too, and the first answer, his or theirs, decides; away from home what waits for a check mark goes to '
+            'them at once, his silent; nothing else of theirs changes. It was no one.'
         )
         meta = {'kind': 'notice', 'user': 'friend', 'user_id': FRIEND, 'approver': 'on', 'until': aw.utc(until)}
         self.assertEqual(self.notices(), [(text, meta)])
@@ -4688,6 +4690,75 @@ class Approver(Statused):
         self.assertEqual(self.fake.footer(self.fake.find(DM, got['draft'])), f'waiting: to {GENERAL}')
         self.reacted(DM, got['draft'], YES, OWNER)
         self.assertEqual(self.fake.last(GENERAL)['content'], 'to the owner alone')
+
+    def test_away_what_waits_for_a_check_mark_is_a_draft_for_the_approver_at_once_and_his_wakes_no_one(self):
+        def flags(channel):
+            return [body.get('flags') for _, _, _, body in self.fake.posts('POST', f'/channels/{channel}/messages')]
+
+        self.use(OWNER, 'mode', mode='trabalho')
+        held = self.tool('discord_post', channel=GENERAL, text='held before the approver')
+        self.assertEqual(held['status'], 'held')
+        self.pushes.clear()
+        said = self.use(OWNER, 'approver on', user=FRIEND, time='2h')
+        self.assertTrue(said.endswith('It was no one. Held for casa: 1 post, which go to them now as drafts.'), said)
+        [draft] = [message for message in self.fake.messages[DM] if message['author'] == BOT]
+        [copy] = self.copies()
+        self.assertEqual((draft['content'], copy['content']), ('held before the approver',) * 2)
+        self.assertEqual((flags(DM), flags(FRIEND_DM)), ([aw.SILENT], [None]))  # theirs wakes them, his no one
+        self.assertEqual(json.loads((self.state / 'held.json').read_text()), {'held': []})
+        [(text, meta)] = [each for each in self.pushes if each[1].get('released')]
+        self.assertEqual(meta, {'kind': 'notice', 'released': '1', 'mode': 'trabalho', 'approver': FRIEND})
+        until = aw.utc(self.now + 7200)
+        self.assertEqual(
+            text,
+            f'The owner is away: 1 of 1 held posts are drafts for the approver, friend ({FRIEND}), now, his silent: '
+            f'held post {held["mark"]} is draft {draft["id"]} (approver: sent to friend ({FRIEND}) too, whose answer '
+            f'counts until {until})',
+        )
+        self.clock.at(self.clock.time + 3, lambda: self.fake.react(self.copies()[-1]['id'], YES, FRIEND))
+        got = self.tool('discord_post', channel=HELP, text='at work, theirs to answer', wait=10)
+        self.assertEqual((got['status'], got['by'], got['mode']), ('sent', FRIEND, 'trabalho'))
+        self.assertEqual(self.fake.last(HELP)['content'], 'at work, theirs to answer')
+        self.assertEqual((flags(DM)[-1], flags(FRIEND_DM)[-1]), (aw.SILENT, None))
+        let_through = self.heard(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
+        self.reacted(GENERAL, let_through, WIMSY, OWNER)
+        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        theirs = f"at once a draft for the approver, friend ({FRIEND}), the owner's silent (mode trabalho)"
+        self.assertEqual(self.pushes[-1][1]['reply'], f'draft only, {theirs}: {why}')
+        said = self.direct(reply_to=let_through)
+        self.assertEqual(said, f'this text goes as a draft, not direct: {why}; post it without direct: it is {theirs}')
+        self.use(OWNER, 'mode', mode='dormindo')  # asleep the same, and his check mark counts too if he sees it
+        got = self.tool('discord_post', channel=GENERAL, text='asleep', wait=0)
+        self.assertEqual((got['status'], got['mode']), ('waiting', 'dormindo'))
+        self.reacted(DM, got['draft'], YES, OWNER)
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'asleep')
+        self.use(OWNER, 'approver off')  # with no approver, held for casa again
+        self.assertEqual(self.tool('discord_post', channel=GENERAL, text='held again')['status'], 'held')
+
+    def test_away_a_copy_their_dms_refuse_leaves_the_post_held_with_no_draft_and_is_said_once(self):
+        self.use(OWNER, 'mode', mode='trabalho')
+        self.use(OWNER, 'approver on', user=FRIEND)
+        route = ('POST', f'/channels/{FRIEND_DM}/messages')
+        self.fake.fail[route] = (403, {'message': 'Cannot send messages to this user', 'code': 50007})
+        got = self.tool('discord_post', channel=GENERAL, text='no one to answer it now', wait=5)
+        error = (
+            f'not sent to friend ({FRIEND}): Discord answered 403 to POST /channels/{FRIEND_DM}/messages: Cannot send '
+            'messages to this user (code 50007)'
+        )
+        self.assertEqual(
+            (got['status'], got['approver'], got['wait']),
+            ('held', error, '5 s not waited: the post is held, with no draft to wait on'),
+        )
+        self.assertEqual(self.fake.messages[DM], [])  # no silent draft left behind for him alone
+        self.pushes.clear()
+        self.ear.tick()
+        self.ear.tick()
+        said = "AogoWimsy could not look at the posts held for casa: the approver's DMs refused a copy, so 1 held "
+        self.assertEqual(self.pushes, [(f'{said}post waits: {error}', {'kind': 'error'})])
+        del self.fake.fail[route]
+        self.ear.tick()
+        self.assertEqual([copy['content'] for copy in self.copies()], ['no one to answer it now'])
+        self.assertEqual(json.loads((self.state / 'held.json').read_text()), {'held': []})
 
 
 class StatusLine(Statused):
@@ -5269,12 +5340,12 @@ class Instructions(WithDiscord):
         self.assertLess(said.index(mentioned) + len(mentioned), CLAUDE_SHOWS)
         self.assertLess(said.index(sentence) + len(sentence), CLAUDE_SHOWS)
         modes = (
-            '/aogo mode says where the owner is, each change a notice with mode and until: casa (home), as above; '
-            'trabalho (work): no drafts, the interval 10 min (20 with the quota or the context high, no agents), a '
-            'direct post it holds back is queued and goes at its turn (status "queued" says when; kind="queued" when '
-            'it went or failed), and a post without direct is held until he is home (status "held"); dormindo '
-            '(asleep): as trabalho, and what was held reaches him in one summary. /aogo approver: someone whose DMs get each '
-            'draft too; the first answer, his or theirs, decides. '
+            '/aogo mode says where the owner is (a notice at each change): casa (home), as above; trabalho (work): the '
+            'interval 10 min, 20 with the quota or the context high; a direct post it holds back is queued for its '
+            'turn (status "queued" says when, kind="queued" once it went or failed); a post without direct is held for '
+            'casa (status "held"), or with an approver is their draft at once; dormindo (asleep): as trabalho, and what '
+            'was held reaches him in one summary. /aogo approver: someone whose DMs get each draft too; the first '
+            'answer, his or theirs, decides. '
         )
         self.assertLess(said.index(modes) + len(modes), CLAUDE_SHOWS)  # the session reads where the owner is
         self.assertIn('gets at once, with no draft', said[CLAUDE_SHOWS:])  # what it is told nothing of comes after
