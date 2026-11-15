@@ -956,6 +956,17 @@ class Post(WithDiscord):
             [(r[1].rsplit('/', 1)[1], r[3]) for r in fetched], [('menu%20before-after.png', None), ('b.JPG', None)]
         )
 
+    def test_sounds_go_with_the_draft_and_with_the_post(self):
+        tracks = [self.image('menu-seed1.opus', b'OggS opus'), self.image('b.MP3', b'ID3 mp3'), self.image('c.ogg')]
+        self.owner_answers(3, YES)
+        got = self.tool('discord_post', channel=GENERAL, text='the music', files=tracks)
+        self.assertEqual(got['status'], 'sent')
+        for message in (self.fake.last(DM), self.fake.last(GENERAL)):
+            names = [(a['filename'], a['content_type']) for a in message['attachments']]
+            self.assertEqual(names, [('menu-seed1.opus', 'audio/ogg'), ('b.MP3', 'audio/mpeg'), ('c.ogg', 'audio/ogg')])
+        posted = self.fake.last(GENERAL)['attachments'][0]['url']
+        self.assertEqual(self.fake.blobs[urllib.parse.urlsplit(posted).path][0], b'OggS opus')
+
     def test_a_restart_keeps_the_drafts_images(self):
         draft = self.tool('discord_post', channel=GENERAL, text='later', files=[self.image('a.webp', b'RIFF webp')])
         fresh = aw.Wimsy(self.settings, aw.Discord(TOKEN, self.clock, self.api), self.clock)
@@ -967,12 +978,18 @@ class Post(WithDiscord):
     def test_files_are_checked_before_discord_hears_of_them(self):
         png = self.image('a.png')
         cases = (
-            ('a.png', 'files is a JSON string, not a list of 1 to 4 absolute paths of images'),
-            ([], 'files is empty: 1 to 4 absolute paths of images (png, jpg, jpeg, gif, webp)'),
-            ([png] * 5, 'files names 5 files: a post carries 1 to 4 images'),
+            ('a.png', 'files is a JSON string, not a list of 1 to 4 absolute paths of images or sounds'),
+            (
+                [],
+                'files is empty: 1 to 4 absolute paths of images or sounds (png, jpg, jpeg, gif, webp, ogg, opus, mp3, wav, flac, m4a)',
+            ),
+            ([png] * 5, 'files names 5 files: a post carries 1 to 4'),
             (['a.png'], 'files item 1 is "a.png", not an absolute path'),
             ([png + '.gone.png'], f'files item 1 is {png}.gone.png, which cannot be read: '),
-            ([self.image('log.txt')], 'files item 1 is a .txt: AogoWimsy posts images (png, jpg, jpeg, gif, webp)'),
+            (
+                [self.image('log.txt')],
+                'files item 1 is a .txt: AogoWimsy posts images and sounds (png, jpg, jpeg, gif, webp, ogg, opus, mp3, wav, flac, m4a)',
+            ),
             ([self.image('empty.png', b'')], 'files item 1, '),
         )
         for files, said in cases:
