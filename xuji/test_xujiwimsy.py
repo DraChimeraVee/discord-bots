@@ -190,7 +190,8 @@ class Handshake(WithXuji):
         # discord_post less what each says of its direct posts' pace: Aogo's weighs Claude Code's quota, Xuji's is fixed
         drafts = json.loads(json.dumps(aogo[0]))
         self.assertEqual(drafts['name'], 'discord_post')
-        drafts['description'] = drafts['description'].removesuffix(aw.direct_text(aw.AOGO))
+        drafts['description'] = drafts['description'].removesuffix(aw.direct_text(aw.AOGO) + aw.modes_text(aw.AOGO))
+        self.assertEqual(aw.modes_text(aw.XUJI), '')  # the owner's modes are AogoWimsy's alone
         mine = xuji[0]['description']
         self.assertTrue(mine.endswith(aw.direct_text(aw.XUJI)))
         as_aogo[0]['description'] = as_aogo[0]['description'][: len(drafts['description'])]

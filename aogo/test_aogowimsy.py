@@ -254,9 +254,18 @@ class FakeDiscord:
             self.server_emojis.setdefault(guild, []).append({'id': DRAWN_IDS[name], 'name': name})
 
     def open_dm(self, query, body):
-        if body != {'recipient_id': OWNER}:
-            return 400, {'message': f'fake: DMs only with the owner, not {body}', 'code': 0}, {}
-        return 200, self.channels[DM], {}
+        found = [
+            channel
+            for channel in self.channels.values()
+            if channel.get('type') == 1 and [user['id'] for user in channel['recipients']] == [body.get('recipient_id')]
+        ]
+        if set(body) != {'recipient_id'} or not found:
+            return (
+                400,
+                {'message': f'fake: DMs only with the owner, a friend and a stranger, not {body}', 'code': 0},
+                {},
+            )
+        return 200, found[0], {}
 
     def gateway(self, query, body):
         return 200, {'url': self.gateway_url, 'shards': 1}, {}
@@ -2611,10 +2620,14 @@ OWNERS_HELP = (
     '/aogo unfreeze user: ends their ice now; their strikes stay\n'
     "/aogo admins role: this server's admin role, which the ice lines for a secret or abuse ping\n"
     '/aogo people: who has a state, and how much reached me, in your DMs with me\n'
-    "/aogo tone [channel mode]: a channel's tone for me, playful or serious; alone, every channel's"
+    "/aogo tone [channel mode]: a channel's tone for me, playful or serious; alone, every channel's\n"
+    '/aogo mode casa|trabalho|dormindo [time]: where you are, which sets how my posts go; time as 30m, 8h or 1d (7d at '
+    'most), until you change it without one; casa by default\n'
+    '/aogo approver on user [time], /aogo approver off: someone who gets my drafts in their DMs too, and the first '
+    'answer, yours or theirs, decides; time 2h, 1d or 7d, 1d without one'
 )
 # /aogo's subcommands, as a log and an answer name them
-SUBS = 'help, allow, deny, allowed, trust, untrust, weight, unfreeze, admins, people, tone'
+SUBS = 'help, allow, deny, allowed, trust, untrust, weight, unfreeze, admins, people, tone, mode, approver'
 TIME_CHOICES = [
     {'name': '2 hours', 'value': '2h'},
     {'name': '1 day', 'value': '1d'},
@@ -2719,6 +2732,55 @@ AOGO_COMMAND = {
                 },
             ],
         },
+        {
+            'type': 1,
+            'name': 'mode',
+            'description': "DraVee only: where you are, which sets how Aogo's posts go",
+            'options': [
+                {
+                    'type': 3,
+                    'name': 'mode',
+                    'description': (
+                        'casa: drafts as before; trabalho: no drafts, a faster interval; dormindo: one summary'
+                    ),
+                    'required': True,
+                    'choices': [
+                        {'name': 'casa (home)', 'value': 'casa'},
+                        {'name': 'trabalho (work)', 'value': 'trabalho'},
+                        {'name': 'dormindo (asleep)', 'value': 'dormindo'},
+                    ],
+                },
+                {
+                    'type': 3,
+                    'name': 'time',
+                    'description': (
+                        'For how long, as 30m, 8h or 1d (7d at most), then casa; until you change it without one'
+                    ),
+                },
+            ],
+        },
+        {
+            'type': 2,
+            'name': 'approver',
+            'description': "DraVee only: someone whose check mark posts Aogo's drafts too",
+            'options': [
+                {
+                    'type': 1,
+                    'name': 'on',
+                    'description': 'DraVee only: they get each draft in their DMs too, and the first answer decides',
+                    'options': [
+                        {'type': 6, 'name': 'user', 'description': 'Who approves', 'required': True},
+                        {
+                            'type': 3,
+                            'name': 'time',
+                            'description': 'For how long: 1 day without one',
+                            'choices': TIME_CHOICES[:3],
+                        },
+                    ],
+                },
+                {'type': 1, 'name': 'off', 'description': 'DraVee only: your drafts go to you alone'},
+            ],
+        },
     ],
 }
 
@@ -2742,6 +2804,11 @@ class Owned(Hearing):
         data = {'id': '800000000000000000', 'name': name, 'type': 1, 'options': [{'type': 1, 'name': sub}]}
         if values:
             data['options'][0]['options'] = values
+        if ' ' in sub:  # a group's subcommand, as "approver on"
+            group, inner = sub.split(' ')
+            data['options'] = [
+                {'type': aw.SUB_COMMAND_GROUP, 'name': group, 'options': [dict(data['options'][0], name=inner)]}
+            ]
         if 'user' in options:
             user = options['user']
             data['resolved'] = {'users': {user: self.fake.user(user)}, 'members': {user: {'nick': None}}}
@@ -4122,6 +4189,548 @@ class About(Statused):
         )
 
 
+# what each mode does, as the owner's answers and the session's notices say it (DraVee approved the modes 2026-11-15)
+CASA = 'past the interval a post is a draft, which a check mark posts'
+TRABALHO = (
+    'no draft: the interval is 10 min, 20 with the quota or the context high; a direct post past it waits its turn in '
+    'the queue, and a draft waits for casa'
+)
+DORMINDO = 'as trabalho, and what waits for casa comes in one summary'
+
+
+class Modes(Statused):
+    """/aogo mode: where the owner is, which sets how a post goes that the interval holds back or that only a check
+    mark lets out: casa as before, trabalho queued or held, dormindo held for one summary"""
+
+    def mode(self, mode, time=None):
+        return self.use(OWNER, 'mode', mode=mode, **({'time': time} if time else {}))
+
+    def queued(self):
+        return [(text, meta) for text, meta in self.pushes if meta['kind'] == 'queued']
+
+    def released(self):
+        return [(text, meta) for text, meta in self.pushes if meta.get('released')]
+
+    def drafts(self):
+        return [message for message in self.fake.messages[DM] if message['author'] == BOT]
+
+    def test_the_owner_alone_sets_it_each_change_told_with_the_mode_before_and_a_restart_keeps_it(self):
+        for who in (STRANGER, FRIEND):
+            self.assertEqual(self.use(who, 'mode', mode='trabalho'), f'Only <@{OWNER}> can use /aogo mode.')
+        self.assertFalse((self.state / 'mode.json').exists())
+        self.assertEqual(self.bot.mode_of(self.now), 'casa')
+        until = int(self.now + 8 * 3600)
+        self.assertEqual(
+            self.mode('trabalho', '8h'),
+            f'Mode trabalho until <t:{until}:f> (<t:{until}:R>), then casa: {TRABALHO}. It was casa, by default.',
+        )
+        text = f'The owner set mode trabalho until {aw.utc(until)}, then casa: {TRABALHO}; it was casa, by default.'
+        meta = {'kind': 'notice', 'mode': 'trabalho', 'until': aw.utc(until), 'was': 'casa'}
+        self.assertEqual(self.notices(), [(text, meta)])
+        self.now += 60
+        self.assertEqual(
+            self.mode('dormindo'),
+            f'Mode dormindo until the next change: {DORMINDO}. It was trabalho until <t:{until}:f> (<t:{until}:R>), '
+            'then casa.',
+        )
+        text, meta = self.notices()[-1]
+        self.assertEqual(
+            text,
+            f'The owner set mode dormindo until the next change: {DORMINDO}; it was trabalho until {aw.utc(until)}, '
+            'then casa.',
+        )
+        self.assertEqual(meta, {'kind': 'notice', 'mode': 'dormindo', 'until': 'next change', 'was': 'trabalho'})
+        in_force = 'the mode is dormindo until the next change.'
+        self.assertEqual(self.mode('praia'), f'mode is "praia", not one of casa, trabalho, dormindo: {in_force}')
+        for wrong in ('8x', '0m', '8d', 'soon', '1.5h', '10081m'):
+            said = self.mode('trabalho', wrong)
+            self.assertEqual(said, f'time is "{wrong}", not a time from 1m to 7d written as 30m, 8h or 1d: {in_force}')
+        self.assertEqual(
+            self.mode('casa', '2h'),
+            'time is "2h", and casa takes none: every mode returns to it. The mode is dormindo until the next change.',
+        )
+        self.assertEqual(self.mode('dormindo'), 'The mode is dormindo until the next change already.')
+        self.assertEqual(len(self.notices()), 2)  # the refusals and the same mode again change nothing
+        self.assertEqual(stat.S_IMODE((self.state / 'mode.json').stat().st_mode), 0o600)
+        fresh, _ = self.restarted(self.now + 3600)
+        self.assertEqual(fresh.mode_of(), 'dormindo')
+        self.assertEqual((aw.mode_time('7d'), aw.mode_time('10080m'), aw.mode_time('1m')), (604800, 604800, 60))
+
+    def test_a_mode_set_for_a_time_runs_out_to_casa_told_once(self):
+        self.mode('trabalho', '30m')
+        self.pushes.clear()
+        self.ear.tick()
+        self.assertEqual(self.pushes, [])
+        self.now += 1800
+        self.ear.tick()
+        said = f'Mode trabalho ran out at {aw.utc(self.now)}: the owner is casa now, where {CASA}'
+        meta = {'kind': 'notice', 'mode': 'casa', 'until': 'next change', 'was': 'trabalho'}
+        self.assertEqual(self.notices(), [(said, meta)])
+        self.ear.tick()
+        _, late = self.restarted(self.now)  # a server started after it ran out tells nothing of it
+        late.started = self.now + 1
+        late.tick()
+        self.assertEqual(len(self.notices()), 1)
+        self.assertEqual(self.bot.mode_of(), 'casa')
+
+    def test_away_the_interval_is_10_min_20_with_the_quota_or_the_context_high_and_the_agents_not_counted(self):
+        self.mode('trabalho')
+        self.bot.settings = self.settings._replace(direct_minutes=60)  # the env file's base is casa's alone
+        cases = (
+            ({}, 10, 'mode trabalho, quota 50%'),
+            ({'agents': 5}, 10, 'mode trabalho, quota 50%'),
+            ({'week': 39, 'gone': 0.4}, 10, 'mode trabalho, quota 39%'),
+            ({'week': 85}, 20, 'mode trabalho, quota 85% x2'),
+            ({'five': 90}, 20, 'mode trabalho, quota 90% x2'),
+            ({'context': 80}, 20, 'mode trabalho, context 80% x2'),
+            ({'week': 85, 'context': 90, 'agents': 4}, 20, 'mode trabalho, quota 85% and context 90% x2'),
+            ({'transcript_path': None}, 10, 'mode trabalho, quota 50%'),
+        )
+        for values, minutes, why in cases:
+            with self.subTest(values=values):
+                self.status(**values)
+                self.assertEqual(self.bot.pace(self.now), aw.Pace(minutes, why))
+        self.status(week=95)
+        stop = 'quota 95% (seven_day): at 95% or more no interval post goes direct'
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(None, stop))
+        self.mode('dormindo')
+        self.status(context=85)
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(20, 'mode dormindo, context 85% x2'))
+        self.mode('casa')
+        self.status(agents=3)
+        self.assertEqual(self.bot.pace(self.now), aw.Pace(120, '3 agents x2'))
+
+    def test_away_a_direct_post_the_interval_holds_back_waits_its_turn_in_the_queue_and_goes(self):
+        self.mode('trabalho')
+        self.status()
+        start = self.now
+        self.assertEqual(self.direct(text='first')['direct'], 'interval')
+        theirs = self.fake.say(GENERAL, STRANGER, 'any news?')
+        got = self.direct(text='second', reply_to=theirs)
+        self.assertRegex(got['mark'], '^[0-9a-f]{32}$')
+        self.assertEqual(
+            got,
+            {
+                'status': 'queued',
+                'mark': got['mark'],
+                'mode': 'trabalho',
+                'goes': aw.utc(start + 600),
+                'ahead': 0,
+                'interval': '10 min: mode trabalho, quota 50%',
+                'channel': GENERAL,
+            },
+        )
+        third = self.direct(text='third')
+        self.assertEqual((third['goes'], third['ahead']), (aw.utc(start + 1200), 1))
+        self.assertEqual(len(self.fake.messages[GENERAL]), 2)  # the first and their question: no draft either
+        self.assertEqual(self.fake.messages[DM], [])
+        said = f'discord_post: queued for the interval (mode trabalho), 1 ahead, for channel {GENERAL}'
+        self.assertIn(said, self.logs)
+        self.assertNotIn('second', ' '.join(self.logs))
+        self.heard(GENERAL, STRANGER, f'<@{BOT}> and now?', mentions=[BOT])
+        reply = f'direct, queued until {aw.hour_minute(start + 1800)} UTC (interval 10 min: mode trabalho, quota 50%)'
+        self.assertEqual(self.pushes[-1][1]['reply'], reply)
+        self.ear.tick()  # not its turn yet
+        self.assertEqual(self.queued(), [])
+        self.now += 600
+        self.status()
+        self.ear.tick()
+        posted = self.fake.last(GENERAL)
+        self.assertEqual((posted['content'], posted['message_reference']['message_id']), ('second', theirs))
+        body = self.fake.posts('POST', f'/channels/{GENERAL}/messages')[-1][3]
+        self.assertEqual(body['allowed_mentions'], {'parse': [], 'replied_user': False})
+        went = f'https://discord.com/channels/{GUILD}/{GENERAL}/{posted["id"]}'
+        meta = {'kind': 'queued', 'mark': got['mark'], 'channel': GENERAL, 'status': 'sent', 'message_id': posted['id']}
+        self.assertEqual(self.queued(), [(f'The post queued at {aw.hour_minute(start)} UTC went direct: {went}', meta)])
+        self.ear.tick()  # the third waits for the next turn
+        self.assertEqual(len(self.queued()), 1)
+        self.now += 600
+        self.status()
+        self.ear.tick()
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'third')
+        records = json.loads((self.state / 'direct.json').read_text())['direct']
+        self.assertEqual([item[3] for item in records], ['interval'] * 3)
+        self.assertTrue(all(item[4] for item in records))  # each with its post
+        self.assertEqual(json.loads((self.state / 'queue.json').read_text()), {'queue': []})
+        self.assertEqual(self.logs.count('channel: pushed a queued event'), 2)
+
+    def test_a_queued_post_discord_refuses_gives_its_turn_and_its_text_back_and_at_home_it_goes_before_new_ones(self):
+        self.mode('trabalho')
+        self.status()
+        start = self.now
+        self.direct(text='first')
+        queued = self.direct(text='second')
+        self.mode('casa')  # what was queued keeps its place: it was taken as a direct post
+        self.assertEqual(
+            self.direct(text='at home'),
+            'this text goes as a draft, not direct: 1 queued post goes first, at the interval of 30 min (quota 50%), '
+            f'so the next goes direct from {aw.hour_minute(start + 3600)} UTC ({aw.utc(start + 3600)}); '
+            f'{self.INSTEAD}, or wait',
+        )
+        self.now += 1800  # casa's interval
+        self.status()
+        route = ('POST', f'/channels/{GENERAL}/messages')
+        self.fake.fail[route] = (403, {'message': 'Missing Permissions', 'code': 50013})
+        self.ear.tick()
+        error = f'Discord answered 403 to POST /channels/{GENERAL}/messages: Missing Permissions (code 50013)'
+        meta = {'kind': 'queued', 'mark': queued['mark'], 'channel': GENERAL, 'status': 'not sent'}
+        text = (
+            f'The post queued at {aw.hour_minute(start)} UTC did not go to channel {GENERAL}: {error}; its text, to '
+            'post again: second'
+        )
+        self.assertEqual(self.queued(), [(text, meta)])
+        self.assertEqual(len(json.loads((self.state / 'direct.json').read_text())['direct']), 1)  # the first's alone
+        del self.fake.fail[route]
+        self.assertEqual(self.direct(text='at home now')['direct'], 'interval')
+
+    def test_away_a_post_without_direct_is_held_and_once_the_owner_is_home_it_is_his_draft(self):
+        until = self.now + 8 * 3600
+        self.mode('trabalho', '8h')
+        asked = self.fake.say(GENERAL, STRANGER, 'can you check?')
+        got = self.tool('discord_post', channel=GENERAL, text='checked, it works', reply_to=asked)
+        self.assertRegex(got['mark'], '^[0-9a-f]{32}$')
+        goes = (
+            "held until the owner is home (mode trabalho), then as a draft in the owner's DMs; mode trabalho runs "
+            f'until {aw.utc(until)}'
+        )
+        self.assertEqual(
+            got,
+            {
+                'status': 'held',
+                'mark': got['mark'],
+                'mode': 'trabalho',
+                'until': aw.utc(until),
+                'held': 1,
+                'goes': goes,
+                'channel': GENERAL,
+            },
+        )
+        self.assertEqual(self.fake.messages[DM], [])  # no draft while he is at work
+        self.assertEqual(
+            self.error('discord_post', channel=GENERAL, text='x', wait=10),
+            "wait is for the owner's answer to a draft, and in mode trabalho none is made now: take it out",
+        )
+        let_through = self.heard(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
+        self.reacted(GENERAL, let_through, WIMSY, OWNER)
+        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        held = 'held until the owner is home (mode trabalho), then as a draft'
+        self.assertEqual(self.pushes[-1][1]['reply'], f'draft only, {held}: {why}')
+        said = self.direct(reply_to=let_through)
+        self.assertEqual(said, f'this text goes as a draft, not direct: {why}; post it without direct: it is {held}')
+        path = self.state / 'held.json'
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        fresh, _ = self.restarted(self.now)
+        self.assertEqual([item['text'] for item in fresh.store.load('held')], ['checked, it works'])
+        self.pushes.clear()
+        self.assertEqual(
+            self.mode('casa'),
+            f'Mode casa until the next change: {CASA}. It was trabalho until <t:{int(until)}:f> (<t:{int(until)}:R>), '
+            'then casa. Held for casa: 1 post, in your DMs now, each a draft.',
+        )
+        self.assertTrue(self.notices()[0][0].endswith('Held for casa: 1 post, which go to his DMs now, each a draft.'))
+        [draft] = self.drafts()
+        self.assertEqual(draft['content'], 'checked, it works')
+        self.assertEqual(self.fake.footer(draft), f'waiting: to {GENERAL} replying to {asked}')
+        self.assertNotIn('flags', self.fake.posts('POST', f'/channels/{DM}/messages')[0][3])  # it wakes him
+        said = f'The owner is home: 1 of 1 held posts are drafts in his DMs now: held post {got["mark"]} is draft '
+        self.assertEqual(self.released(), [(said + draft['id'], {'kind': 'notice', 'mode': 'casa', 'released': '1'})])
+        self.assertEqual(json.loads(path.read_text()), {'held': []})
+        self.reacted(DM, draft['id'], YES, OWNER)
+        posted = self.fake.last(GENERAL)
+        self.assertEqual((posted['content'], posted['message_reference']['message_id']), ('checked, it works', asked))
+        self.ear.tick()
+        self.assertEqual(len(self.drafts()), 1)  # none twice
+
+    def test_asleep_what_was_held_reaches_the_owner_in_one_summary_and_its_drafts_wake_no_one(self):
+        self.mode('dormindo', '8h')
+        asked = self.fake.say(GENERAL, STRANGER, 'can you check?')
+        gone = self.fake.say(GENERAL, STRANGER, 'deleted later')
+        png = self.home / 'shot.png'
+        png.write_bytes(PNG)
+        first = self.tool('discord_post', channel=GENERAL, text='short answer', reply_to=asked)
+        self.assertTrue(first['goes'].startswith('held until the owner is home (mode dormindo), then in one summary'))
+        long = 'a long answer ' * 20
+        self.tool('discord_post', channel=HELP, text=long, files=[str(png)])
+        last = self.tool('discord_post', channel=GENERAL, text='to a deleted message', reply_to=gone)
+        self.fake.messages[GENERAL].remove(self.fake.find(GENERAL, gone))
+        self.assertEqual(self.fake.messages[DM], [])
+        self.pushes.clear()
+        self.now += 8 * 3600
+        self.ear.tick()  # it ran out: casa, and what was held goes to him
+        self.assertEqual(self.notices()[0][1]['was'], 'dormindo')
+        drafts = self.drafts()
+        self.assertEqual([draft['content'] for draft in drafts[:2]], ['short answer', long])
+        self.assertEqual(drafts[1]['attachments'][0]['filename'], 'shot.png')
+        bodies = [body for _, _, _, body in self.fake.posts('POST', f'/channels/{DM}/messages')]
+        self.assertEqual([body.get('flags') for body in bodies], [aw.SILENT, aw.SILENT, None])  # the summary wakes him
+        preview = ' '.join(long.split())[:77] + '...'
+        error = f'Discord answered 404 to GET /channels/{GENERAL}/messages/{gone}: Unknown Message (code 10008)'
+        self.assertEqual(
+            drafts[2]['content'],
+            f'While you were away, 3 posts waited for your {YES}:\n'
+            f'1. #general replying to https://discord.com/channels/{GUILD}/{GENERAL}/{asked}: "short answer"; draft '
+            f'https://discord.com/channels/@me/{DM}/{drafts[0]["id"]}\n'
+            f'2. #help: "{preview}"; draft https://discord.com/channels/@me/{DM}/{drafts[1]["id"]}\n'
+            f'3. channel {GENERAL}: "to a deleted message"; no draft: {error}',
+        )
+        [(text, meta)] = self.released()
+        self.assertEqual(meta, {'kind': 'notice', 'mode': 'casa', 'released': '3'})
+        head = 'The owner is home: 2 of 3 held posts are drafts in his DMs now, with one summary: '
+        self.assertTrue(text.startswith(head), text)
+        tail = f'held post {last["mark"]} for channel {GENERAL} is no draft: {error}; its text: to a deleted message'
+        self.assertTrue(text.endswith(tail), text)
+        self.assertIn('held: 2 of 3 held posts are drafts now, with a summary', self.logs)
+        self.assertNotIn('short answer', ' '.join(self.logs))
+
+    def test_the_queue_and_the_held_posts_outlive_a_restart_and_a_stopped_servers_queue_is_taken_over(self):
+        self.mode('trabalho')
+        self.status()
+        self.direct(text='first')
+        self.direct(text='second')
+        self.tool('discord_post', channel=GENERAL, text='held')
+        for name in ('queue', 'held', 'mode'):
+            self.assertEqual(stat.S_IMODE((self.state / f'{name}.json').stat().st_mode), 0o600)
+        items = json.loads((self.state / 'queue.json').read_text())['queue']
+        items[0]['pid'] = 4_000_000  # a server that stopped: no process has that id
+        (self.state / 'queue.json').write_text(json.dumps({'queue': items}))
+        self.now += 600
+        fresh, ear = self.restarted(self.now)
+        fresh.statusline, fresh.claude = self.bot.statusline, None
+        self.status()
+        ear.tick()
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'second')
+        [(text, _)] = self.queued()
+        queued = f'The post queued at {aw.hour_minute(self.now - 600)} UTC by a server that stopped went direct: '
+        self.assertTrue(text.startswith(queued), text)
+        self.assertEqual([item['text'] for item in fresh.store.load('held')], ['held'])
+
+    def test_a_mode_held_or_queue_file_it_cannot_read_stops_what_reads_it_saying_so_and_messages_still_reach(self):
+        aw.private_folder(self.state)
+        path = self.state / 'mode.json'
+        path.write_text('{"mode": [{"mode": "praia"}]}')
+        said = self.error('discord_post', channel=GENERAL, text='x')
+        self.assertTrue(said.startswith(f'{path}: item 1 is {{"mode": "praia"}}, not '), said)
+        stops = 'no draft is made, no interval post goes direct, and no mode is shown until it is mended or removed'
+        self.assertTrue(said.endswith(stops), said)
+        asked = self.fake.say(GENERAL, OWNER, 'still there?')
+        self.assertEqual(self.direct(reply_to=asked)['direct'], 'owner')  # his replies need no mode
+        self.status()
+        self.assertIsNone(self.bot.pace(self.now).minutes)
+        self.assertTrue(self.bot.pace(self.now).why.startswith(f'the mode cannot be read: {path}: item 1 is '))
+        self.heard(GENERAL, STRANGER, f'<@{BOT}> hello', mentions=[BOT])
+        self.assertTrue(self.pushes[-1][1]['reply'].startswith(f'unknown: {path}: item 1 is '))  # it reached still
+        path.unlink()
+        (self.state / 'held.json').write_text('{"held": 5}')
+        self.pushes.clear()
+        self.ear.tick()
+        self.ear.tick()
+        [(said, meta)] = self.pushes
+        self.assertEqual(meta, {'kind': 'error'})
+        held = self.state / 'held.json'
+        self.assertTrue(
+            said.startswith(f'AogoWimsy could not look at the posts held for casa: {held} holds {{"held": 5}}')
+        )
+        self.assertTrue(said.endswith('no post is held, and none held is released until it is mended or removed'), said)
+
+
+class Approver(Statused):
+    """/aogo approver: someone whose DMs get each draft too, for a time; the first answer, the owner's or theirs,
+    decides, and nothing else of theirs changes"""
+
+    def copies(self, channel=FRIEND_DM):
+        return [message for message in self.fake.messages[channel] if message['author'] == BOT]
+
+    def test_the_owner_alone_sets_one_told_with_who_it_was_and_each_value_refused_named(self):
+        for who in (STRANGER, FRIEND):
+            self.assertEqual(self.use(who, 'approver on', user=FRIEND), f'Only <@{OWNER}> can use /aogo approver on.')
+        self.assertEqual(self.use(OWNER, 'approver off'), 'No one approves your drafts but you.')
+        until = int(self.now + 7200)
+        self.assertEqual(
+            self.use(OWNER, 'approver on', user=FRIEND, time='2h'),
+            f'<@{FRIEND}> approves your drafts too, until <t:{until}:f> (<t:{until}:R>): each draft goes to their DMs '
+            'as well, and the first answer, yours or theirs, decides; nothing else of theirs changes. It was no one.',
+        )
+        text = (
+            f'The owner made friend ({FRIEND}) an approver until {aw.utc(until)} (2 hours): each draft goes to their '
+            'DMs too, and the first answer, his or theirs, decides; nothing else of theirs changes. It was no one.'
+        )
+        meta = {'kind': 'notice', 'user': 'friend', 'user_id': FRIEND, 'approver': 'on', 'until': aw.utc(until)}
+        self.assertEqual(self.notices(), [(text, meta)])
+        in_force = f'the approver is <@{FRIEND}> until <t:{until}:f> (<t:{until}:R>).'
+        self.assertEqual(
+            self.use(OWNER, 'approver on', user=OWNER),
+            f'<@{OWNER}> is the owner, whose answer decides every draft already; {in_force}',
+        )
+        self.assertEqual(self.use(OWNER, 'approver on', user=BOT), f'<@{BOT}> is AogoWimsy itself; {in_force}')
+        self.assertEqual(
+            self.use(OWNER, 'approver on', user=OTHER_BOT),
+            f'<@{OTHER_BOT}> is a bot, which answers no draft; {in_force}',
+        )
+        self.assertEqual(
+            self.use(OWNER, 'approver on', user=STRANGER, time='perm'),
+            f'time is "perm", not one of 2h, 1d, 7d: {in_force}',
+        )
+        day = int(self.now + 24 * 3600)
+        said = self.use(OWNER, 'approver on', user=STRANGER)  # a day with no time, in the other's place
+        self.assertTrue(said.startswith(f'<@{STRANGER}> approves your drafts too, until <t:{day}:f>'), said)
+        self.assertTrue(said.endswith(f'It was <@{FRIEND}> until <t:{until}:f> (<t:{until}:R>).'), said)
+        self.assertTrue(self.notices()[-1][0].endswith(f'It was friend ({FRIEND}) until {aw.utc(until)}.'))
+        self.assertEqual(self.bot.standing(STRANGER).level, 'allowed')  # nothing else of theirs changes
+        self.assertEqual(self.use(STRANGER, 'mode', mode='casa'), f'Only <@{OWNER}> can use /aogo mode.')
+        self.assertEqual(
+            self.use(OWNER, 'approver off'),
+            f'<@{STRANGER}> approves no more drafts; it ran until <t:{day}:f> (<t:{day}:R>).',
+        )
+        text, meta = self.notices()[-1]
+        self.assertEqual(
+            text,
+            f'The owner took Stranger ({STRANGER}) off as approver, which ran until {aw.utc(day)}: each draft goes to '
+            'him alone.',
+        )
+        self.assertEqual(meta, {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'approver': 'off'})
+        self.assertEqual(json.loads((self.state / 'approver.json').read_text()), {'approver': []})
+        fresh, _ = self.restarted(self.now)
+        self.use(OWNER, 'approver on', user=FRIEND, time='7d')
+        self.assertEqual(fresh.approver_item()['id'], FRIEND)  # another server, or a restart, reads it
+        self.assertEqual(stat.S_IMODE((self.state / 'approver.json').stat().st_mode), 0o600)
+
+    def test_each_draft_goes_to_both_and_the_approvers_check_mark_posts_it_and_says_so_on_the_owners(self):
+        self.use(OWNER, 'approver on', user=FRIEND, time='2h')
+        until = aw.utc(self.now + 7200)
+        got = self.tool('discord_post', channel=GENERAL, text='a draft for two', wait=0)
+        self.assertEqual(got['approver'], f'sent to friend ({FRIEND}) too, whose answer counts until {until}')
+        [draft] = [message for message in self.fake.messages[DM] if message['author'] == BOT]
+        [copy] = self.copies()
+        self.assertEqual((got['draft'], copy['content']), (draft['id'], 'a draft for two'))
+        self.assertEqual(self.fake.footer(draft), f'waiting: to {GENERAL} twin {FRIEND_DM}/{copy["id"]}')
+        self.assertEqual(self.fake.footer(copy), f'waiting: to {GENERAL} twin {DM}/{draft["id"]}')
+        self.assertIn(f'<@{FRIEND}> has it too, until ', draft['embeds'][0]['description'])
+        self.assertIn(
+            f'<@{OWNER}> has it too: the first answer, his or yours, decides.', copy['embeds'][0]['description']
+        )
+        self.assertEqual(self.fake.reactions[copy['id']], {YES: [BOT], NO: [BOT]})
+        self.reacted(FRIEND_DM, copy['id'], YES, BOT)  # its own reactions are no answer
+        self.assertEqual(self.fake.messages[GENERAL], [])
+        self.assertNotIn('counts no more', self.fake.find(FRIEND_DM, copy['id'])['embeds'][0]['description'])
+        self.reacted(FRIEND_DM, copy['id'], YES, FRIEND)
+        posted = self.fake.last(GENERAL)
+        self.assertEqual(posted['content'], 'a draft for two')
+        went = f'https://discord.com/channels/{GUILD}/{GENERAL}/{posted["id"]}'
+        meta = {'kind': 'draft', 'draft': draft['id'], 'status': 'sent', 'channel': GENERAL, 'by': FRIEND}
+        said = f'The approver ({FRIEND}) approved draft {draft["id"]}: posted as {went}'
+        self.assertEqual(self.pushes[-1], (said, meta | {'message_id': posted['id']}))
+        draft, copy = self.fake.find(DM, draft['id']), self.fake.find(FRIEND_DM, copy['id'])
+        self.assertEqual(draft['embeds'][0]['description'], f'Sent: {went}\n{YES} by <@{FRIEND}>.')
+        self.assertEqual(copy['embeds'][0]['description'], f'Sent: {went}\n{YES} by <@{FRIEND}>.')
+        self.assertEqual(self.fake.footer(copy), f'sent: {GUILD}/{GENERAL}/{posted["id"]}')
+        self.reacted(DM, draft['id'], YES, OWNER)  # the second check mark: it went already
+        self.assertEqual(len(self.fake.messages[GENERAL]), 1)
+        self.assertEqual(self.tool('discord_post_status', draft=draft['id'], wait=0)['message'], posted['id'])
+        self.owner_answers(3, YES)  # the owner's first: the copy says it went, and by whose
+        got = self.tool('discord_post', channel=HELP, text='his first', wait=10)
+        self.assertEqual((got['status'], got['by']), ('sent', OWNER))
+        self.assertEqual(self.copies()[-1]['embeds'][0]['description'], f'Sent: {got["link"]}\n{YES} by <@{OWNER}>.')
+        self.clock.at(self.clock.time + 3, lambda: self.fake.react(self.copies()[-1]['id'], YES, FRIEND))
+        got = self.tool('discord_post', channel=HELP, text='theirs while a tool waits', wait=10)
+        self.assertEqual((got['status'], got['by']), ('sent', FRIEND))
+
+    def test_the_approvers_cross_drops_it_and_once_their_time_ran_out_their_answer_counts_no_more(self):
+        self.ear.started = self.now
+        self.use(OWNER, 'approver on', user=STRANGER, time='2h')
+        dropped = self.tool('discord_post', channel=GENERAL, text='not this one', wait=0)['draft']
+        [copy] = self.copies(STRANGER_DM)
+        self.reacted(STRANGER_DM, copy['id'], NO, STRANGER)
+        meta = {'kind': 'draft', 'draft': dropped, 'status': 'not sent', 'channel': GENERAL, 'by': STRANGER}
+        said = f'The approver ({STRANGER}) refused draft {dropped}: not posted to channel {GENERAL}'
+        self.assertEqual(self.pushes[-1], (said, meta))
+        refused = f'{NO}: not sent to channel {GENERAL}. {NO} by <@{STRANGER}>.'
+        self.assertEqual(self.fake.find(DM, dropped)['embeds'][0]['description'], refused)
+        copy = self.fake.find(STRANGER_DM, copy['id'])
+        self.assertEqual(self.fake.footer(copy), f'not sent: to {GENERAL} twin {DM}/{dropped}')
+        waiting = self.tool('discord_post', channel=GENERAL, text='after their time', wait=0)['draft']
+        copy = self.copies(STRANGER_DM)[-1]
+        self.pushes.clear()
+        self.now += 7200
+        self.ear.tick()
+        said = (
+            f'The approval of Stranger ({STRANGER}) ran out at {aw.utc(self.now)}: each draft goes to the owner alone'
+        )
+        meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'approver': 'ended'}
+        self.assertEqual(self.notices(), [(said, meta)])
+        self.ear.tick()
+        self.assertEqual(len(self.notices()), 1)
+        self.reacted(STRANGER_DM, copy['id'], YES, STRANGER)
+        self.assertEqual(self.fake.messages[GENERAL], [])
+        note = f"Your answer here counts no more: you approve no draft now, and <@{OWNER}>'s decides."
+        self.assertTrue(self.fake.find(STRANGER_DM, copy['id'])['embeds'][0]['description'].endswith(note))
+        self.reacted(STRANGER_DM, copy['id'], NO, STRANGER)
+        self.assertEqual(self.fake.find(STRANGER_DM, copy['id'])['embeds'][0]['description'].count(note), 1)
+        self.reacted(DM, waiting, YES, OWNER)
+        posted = self.fake.last(GENERAL)
+        self.assertEqual(posted['content'], 'after their time')
+        self.assertEqual(
+            self.fake.footer(self.fake.find(STRANGER_DM, copy['id'])), f'sent: {GUILD}/{GENERAL}/{posted["id"]}'
+        )
+        before = len(self.copies(STRANGER_DM))
+        self.tool('discord_post', channel=GENERAL, text='to the owner alone', wait=0)
+        self.assertEqual(len(self.copies(STRANGER_DM)), before)  # no copy once their time ran out
+
+    def test_a_copy_discord_refuses_is_said_and_the_owner_alone_answers_the_draft(self):
+        self.use(OWNER, 'approver on', user=FRIEND)
+        refused = (403, {'message': 'Cannot send messages to this user', 'code': 50007})
+        self.fake.fail[('POST', f'/channels/{FRIEND_DM}/messages')] = refused
+        got = self.tool('discord_post', channel=GENERAL, text='to the owner alone', wait=0)
+        self.assertEqual(
+            got['approver'],
+            f'not sent to friend ({FRIEND}): Discord answered 403 to POST /channels/{FRIEND_DM}/messages: Cannot send '
+            'messages to this user (code 50007); the owner alone answers it',
+        )
+        self.assertEqual(self.fake.footer(self.fake.find(DM, got['draft'])), f'waiting: to {GENERAL}')
+        self.reacted(DM, got['draft'], YES, OWNER)
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'to the owner alone')
+
+
+class StatusLine(Statused):
+    """the state folder's line for the owner's status line: the mode, its end and the approver"""
+
+    def line(self):
+        return (self.state / 'line').read_text()
+
+    def test_it_says_the_mode_its_end_and_the_approver_from_the_start_and_at_each_change(self):
+        self.ear.once()
+        self.assertEqual(self.line(), 'aogo: casa\n')
+        self.assertEqual(stat.S_IMODE((self.state / 'line').stat().st_mode), 0o600)
+        self.use(OWNER, 'mode', mode='trabalho', time='8h')
+        end = aw.local_time(self.now + 8 * 3600, self.now)
+        self.assertEqual(self.line(), f'aogo: trabalho ate {end}\n')
+        self.use(OWNER, 'approver on', user=FRIEND, time='7d')
+        week = aw.local_time(self.now + 7 * 24 * 3600, self.now)
+        self.assertRegex(week, r'^[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}$')  # another day: its date first
+        self.assertEqual(self.line(), f'aogo: trabalho ate {end}, aprova friend ate {week}\n')
+        self.now += 8 * 3600
+        self.ear.tick()  # the mode ran out: the line says so at the ear's next look
+        week = aw.local_time(self.start + 7 * 24 * 3600, self.now)
+        self.assertEqual(self.line(), f'aogo: casa, aprova friend ate {week}\n')
+        old = time.time() - aw.LINE_FRESH
+        os.utime(self.state / 'line', (old, old))
+        self.ear.tick()  # the same words, written again: the status line drops a line no server keeps fresh
+        self.assertLess(time.time() - (self.state / 'line').stat().st_mtime, 60)
+        self.use(OWNER, 'approver off')
+        self.assertEqual(self.line(), 'aogo: casa\n')
+        self.assertRegex(aw.local_time(self.now + 60, self.now), r'^[0-9]{2}:[0-9]{2}$')
+
+    def test_xujiwimsy_has_no_mode_and_writes_no_line(self):
+        settings = self.settings._replace(identity=aw.XUJI)
+        discord = aw.Discord(TOKEN, self.clock, self.api, identity=aw.XUJI)
+        xuji = aw.Wimsy(settings, discord, self.clock, state=self.home / 'xuji')
+        self.assertFalse(xuji.keep_line(self.now))
+        self.assertFalse((self.home / 'xuji' / 'line').exists())
+        self.assertEqual(xuji.mode_of(), 'casa')
+        self.assertEqual(aw.subcommands(aw.XUJI), aw.SUBCOMMANDS)
+        self.assertNotIn('mode', [option['name'] for option in aw.command_list(aw.XUJI)[0]['options']])
+        self.assertNotIn('/xuji mode', aw.instructions(settings))
+
+
 PLAYFUL = '1558959542543589416'  # the server's #general, playful by default (DraVee, 2026-11-06)
 PLAYFUL_THREAD = '300000000000000014'  # a thread of it, which the gateway never brought
 RULE = "A thread takes its channel's tone unless set itself. In a playful channel a message that starts with serio: is serious."
@@ -4659,6 +5268,16 @@ class Instructions(WithDiscord):
         mentioned = 'Whom a post of yours mentions may reply to it for 24 h: kind="mentioned", draft only. '
         self.assertLess(said.index(mentioned) + len(mentioned), CLAUDE_SHOWS)
         self.assertLess(said.index(sentence) + len(sentence), CLAUDE_SHOWS)
+        modes = (
+            '/aogo mode says where the owner is, each change a notice with mode and until: casa (home), as above; '
+            'trabalho (work): no drafts, the interval 10 min (20 with the quota or the context high, no agents), a '
+            'direct post it holds back is queued and goes at its turn (status "queued" says when; kind="queued" when '
+            'it went or failed), and a post without direct is held until he is home (status "held"); dormindo '
+            '(asleep): as trabalho, and what was held reaches him in one summary. /aogo approver: someone whose DMs get each '
+            'draft too; the first answer, his or theirs, decides. '
+        )
+        self.assertLess(said.index(modes) + len(modes), CLAUDE_SHOWS)  # the session reads where the owner is
+        self.assertIn('gets at once, with no draft', said[CLAUDE_SHOWS:])  # what it is told nothing of comes after
         xuji = aw.instructions(self.settings._replace(identity=aw.XUJI))
         for words in ('/aogo tone', '"playful"', 'serio:'):  # Xuji's own: its events carry the tone, /xuji sets it
             self.assertNotIn(words, xuji)

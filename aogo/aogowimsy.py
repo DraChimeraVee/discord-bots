@@ -14,8 +14,9 @@ and XujiWimsy any client but Claude Code: each refuses the other's client, namin
 the other one's bot. Its tools:
 
     discord_post         a draft in the owner's DMs with the bot, with a check mark and a cross: only the owner's
-                         check mark posts it, as it is, pinging no one; with direct, AogoWimsy's goes at once where
-                         its rules let it (way, post_direct), else an error naming why
+                         check mark posts it (or the approver's, on their copy), as it is, pinging no one; with
+                         direct, AogoWimsy's goes at once where its rules let it (way, post_direct), else an error
+                         naming why; away from home (/aogo mode), queued for the interval's turn or held for casa
     discord_post_status  the same wait, on a draft that came back still waiting
     discord_read         a channel's messages: the owner's, the trusted (XujiWimsy: listed) users', the allowed
                          ones' and the bot's own; others only counted
@@ -65,11 +66,24 @@ AogoWimsy registers its slash command, /aogo (command_list), in each server it i
 server, guild-scoped so it shows at once, and sends it only when the server's differs from it. /aogo help answers
 anyone, seen by them alone: GREETING and how to ask, a stranger within the greeting's limits (counted apart), the
 owner with his commands too. /aogo allow user [time] (2h, 1d, 7d or perm; 1d without one), /aogo deny user and
-/aogo allowed, trust, untrust, weight, unfreeze, admins, people and tone are the owner's: anyone else is answered
-that they are his. Discord sets who sees a command for the whole of it, never a subcommand, so every member sees
-them all. An allowed person is heard until the allow runs out, then as a stranger again, with no word to them; each
-change of who reaches the session, or of a channel's tone, reaches it as a notice. /aogo people sends the owner, in
-his DMs with the bot, everyone with a state and the interval in force.
+/aogo allowed, trust, untrust, weight, unfreeze, admins, people, tone, mode and approver are the owner's: anyone else
+is answered that they are his. Discord sets who sees a command for the whole of it, never a subcommand, so every
+member sees them all. An allowed person is heard until the allow runs out, then as a stranger again, with no word to
+them; each change of who reaches the session, of a channel's tone, of the mode or of the approver, reaches it as a
+notice. /aogo people sends the owner, in his DMs with the bot, everyone with a state and the interval in force.
+
+/aogo mode casa|trabalho|dormindo [time] (MODES; a time as 30m, 8h or 1d, 7d at most, then casa; none: until the next
+change) says where the owner is, and so how a post goes that the interval holds back or that only his check mark lets
+out. casa, the default: as before, a draft. trabalho: no draft; the interval is AWAY_MINUTES, doubled once for the quota
+or the context high, the agents not counted; a direct post the interval holds back is queued (queue.json) and goes at
+its turn, posted by the ear of the server that queued it (or of any, once that one stopped), which tells its session as
+kind queued; a post without direct is held (held.json) until he is home. dormindo: as trabalho, and once he is home what
+was held comes as drafts that wake no one (SILENT) and one summary that does. Once he is home (casa set, or a mode's
+time run out), the first server to look makes every held post a draft. /aogo approver on user [time] (2h, 1d or 7d; 1d
+without one) and /aogo approver off: each draft goes to the approver's DMs too, a copy naming the owner's draft and his
+naming it (the twin in each card's footer), and the first answer, his on his or theirs on theirs, decides, said on
+both; once their time runs out their answer counts no more, which their copy says. They get nothing else: no trust, no
+command. AogoWimsy alone: XujiWimsy has neither.
 
 Who reaches AogoWimsy's session, and how much (Standing): the owner always; the people he trusts (<PREFIX>_USERS
 lists who starts trusted, a key deprecated, said to the owner once) 30 messages an hour, those he allowed 10, unless
@@ -110,9 +124,12 @@ no server answers one twice; people.json, each person's trust, weight, ice and s
 each message of a trusted, allowed, let-through or mentioned person of the last day; direct.json, each direct post
 of the last day; mentions.json, the time, the post's id and the person's id of each mention of a post of the last
 MENTION_HOURS hours; admins.json, each server's admin role; tones.json, each channel's tone the owner set where it
-differs from the one it has without it; flags.json, the notes to the owner said once. A draft waiting is a
-message in the owner's DMs, read again at each look, and stderr says what ran or failed, never what was said nor who
-said it.
+differs from the one it has without it; flags.json, the notes to the owner said once; mode.json, the mode the owner set
+and until when; approver.json, the approver and until when; queue.json, each direct post queued for its turn (its text,
+where it goes and the server's pid); held.json, each post held for casa (its text, where it goes and its images' paths);
+and LINE_FILE, one line for the owner's status line (the mode, its end and the approver), written at the start, at each
+change and again each LINE_FRESH. A draft waiting is a message in the owner's DMs, read again at each look, and stderr
+says what ran or failed, never what was said nor who said it.
 """
 
 import argparse
@@ -162,6 +179,7 @@ class Identity(NamedTuple):
     program: str = 'aogo/aogowimsy.py'  # its program, from the repository's root: the monitor runs it --listen
     direct: bool = False  # True: it may post at once, within its rules, the quota and context of Claude Code's
     mentions: bool = False  # True: someone a post of its mentions may reply to that post (MENTION_HOURS)
+    modes: bool = False  # True: its command sets where the owner is (MODES) and an approver of its drafts
 
     def key(self, name):
         return f'{self.prefix}_{name}'
@@ -258,11 +276,54 @@ HELP_OWNER = (
     '/{command} people: who has a state, and how much reached me, in your DMs with me\n'
     "/{command} tone [channel mode]: a channel's tone for me, playful or serious; alone, every channel's"
 )
+HELP_MODES = (  # an identity's with modes, after HELP_OWNER
+    '\n/{command} mode casa|trabalho|dormindo [time]: where you are, which sets how my posts go; time as 30m, 8h or 1d '
+    '(7d at most), until you change it without one; casa by default\n'
+    '/{command} approver on user [time], /{command} approver off: someone who gets my drafts in their DMs too, and the '
+    'first answer, yours or theirs, decides; time 2h, 1d or 7d, 1d without one'
+)
 ALLOW_TIMES = {'2h': 2 * 3600, '1d': 24 * 3600, '7d': 7 * 24 * 3600, 'perm': None}  # seconds; None: until denied
 ALLOW_NAMES = {'2h': '2 hours', '1d': '1 day', '7d': '7 days', 'perm': 'permanent'}  # as Discord's picker shows them
 ALLOW_DEFAULT = '1d'  # an allow with no time
 SUBCOMMANDS = ('help', 'allow', 'deny', 'allowed', 'trust', 'untrust', 'weight', 'unfreeze', 'admins', 'people', 'tone')
-OWNERS_ALONE = SUBCOMMANDS[1:]
+# Where the owner is (DraVee, 2026-11-15: "Preciso relaxar essa janela de 1h dps"; "precisa colocar as opcoes de
+# quando to em casa, no trabalho, dormindo e quando permito outra pessoa aprovar"; and of the proposal below, "Faca
+# isso"): how a post goes that the interval holds back or that only a check mark lets out. casa (home), the default:
+# as before, a draft. trabalho (work): no draft; the interval's base AWAY_MINUTES, doubled once for the quota or the
+# context high, the agents not counted; a direct post the interval holds back is queued and goes at its turn, and a
+# draft is held until he is at home. dormindo (asleep): as trabalho, and what was held reaches him in one summary. A
+# mode set for a time runs that long, then casa; without one, until the next change
+MODES = ('casa', 'trabalho', 'dormindo')
+HOME = 'casa'
+MODE_MEANS = {  # what a mode does, as the owner's answer and the session's notice say it
+    'casa': 'past the interval a post is a draft, which a check mark posts',
+    'trabalho': (
+        'no draft: the interval is 10 min, 20 with the quota or the context high; a direct post past it waits its turn '
+        'in the queue, and a draft waits for casa'
+    ),
+    'dormindo': 'as trabalho, and what waits for casa comes in one summary',
+}
+AWAY_MINUTES = 10  # the interval's base away from home
+MODE_UNITS = {'m': 60, 'h': 3600, 'd': 24 * 3600}  # a mode's time: a whole number and its unit, as 30m, 8h or 1d
+MOST_MODE = 7 * 24 * 3600  # seconds a mode's time may run
+# The approver (the same proposal): someone whose DMs get each draft too, for a time, and the first answer, the
+# owner's or theirs, decides; nothing else of the bot changes for them
+APPROVE_TIMES = {'2h': 2 * 3600, '1d': 24 * 3600, '7d': 7 * 24 * 3600}
+APPROVE_DEFAULT = '1d'
+MODE_SUBCOMMANDS = ('mode', 'approver')  # an identity's with modes: approver is a group, on and off
+SILENT = 1 << 12  # Discord's SUPPRESS_NOTIFICATIONS: a message that wakes no one, as the summary's drafts are
+PREVIEW = 80  # letters of a held post the summary shows
+# The owner's status line shows the mode (DraVee, 2026-11-15: "deixe disponivel pra mim ver na barra junto dos status
+# da cpu e gpu"): one line in the state folder, written at the start, at each change and again each LINE_FRESH while a
+# server runs, so his status line drops an older one as no server's
+LINE_FILE = 'line'
+LINE_FRESH = 5 * 60
+MODE_LOOKS = {  # each look of the ear at the mode's state, as an error names it
+    'ran out': 'a mode or an approver that ran out',
+    'held': 'the posts held for casa',
+    'queue': 'the queued posts',
+    'line': "the status line's file",
+}
 # The weights (DraVee, 2026-11-05: "peso temporario: tipo eu poder num periodo de tempo permitir q a pessoa converse
 # mais com vc ou menos"): the messages of a person an hour that reach the session; past them the rest is only counted
 WEIGHTS = {'mute': 0, 'low': 3, 'normal': 10, 'high': 30}
@@ -297,6 +358,7 @@ LINE_EVERY = 3600  # seconds before a rule's fixed reply goes to the same person
 # Discord's numbers: a command of the chat input (CHAT_INPUT), its options' types, an interaction's type, the answer
 # that is a message (CHANNEL_MESSAGE_WITH_SOURCE) and the flag that shows it to its asker alone
 CHAT_INPUT, SUB_COMMAND, STRING_OPTION, USER_OPTION, CHANNEL_OPTION, ROLE_OPTION = 1, 1, 3, 6, 7, 8
+SUB_COMMAND_GROUP = 2
 APPLICATION_COMMAND, MESSAGE_ANSWER, EPHEMERAL = 2, 4, 1 << 6
 MISSING_ACCESS = 50001  # Discord's code for a server whose install lacks applications.commands
 HANDLED_FOR = 24 * 3600  # seconds an interaction's answer is kept, so another server of the bot, or a replay, does not
@@ -317,6 +379,10 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
         "nothing of a stranger is sorted (no greeting, no mentioned person's reply, no discord_read of a channel with "
         'theirs)'
     ),
+    'mode': 'no draft is made, no interval post goes direct, and no mode is shown',
+    'approver': 'no draft is made, and no approver is shown',
+    'queue': 'no post is queued, and none queued goes',
+    'held': 'no post is held, and none held is released',
 }
 YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
 # The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
@@ -343,6 +409,7 @@ AOGO = Identity(
     drawn=DRAWN,
     direct=True,
     mentions=True,
+    modes=True,
 )
 XUJI = Identity(
     'xujiwimsy',
@@ -384,7 +451,10 @@ INVITE = 1 << 10 | 1 << 11 | 1 << 6 | 1 << 16 | 1 << 38 | ATTACH_FILES
 DM, GROUP_DM, THREADS, REPLY = 1, 3, (10, 11, 12), 19
 SNOWFLAKE = re.compile(r'[0-9]{17,20}')
 TOKEN_LETTER = re.compile(r'[A-Za-z0-9._-]')
-WAITING = re.compile(r'(waiting|sending|not sent): to ([0-9]{17,20})(?: replying to ([0-9]{17,20}))?')
+WAITING = re.compile(
+    r'(waiting|sending|not sent): to ([0-9]{17,20})(?: replying to ([0-9]{17,20}))?'
+    r'(?: twin ([0-9]{17,20})/([0-9]{17,20}))?'
+)
 SENT = re.compile(r'sent: ([0-9]{17,20}|@me)/([0-9]{17,20})/([0-9]{17,20})')
 VERSIONS = ('2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05')  # the initialize handshake's
 METHODS = ('initialize', 'ping', 'tools/list', 'tools/call')
@@ -515,13 +585,28 @@ class Way(NamedTuple):
     rule: str | None  # owner, trusted or interval: direct; None: a draft only
     why: str  # why a draft only; for the interval, its factors
     left: int  # direct replies left to the message, for owner and trusted
-    next: float | None  # when the next interval post may go
+    next: float | None  # when the next interval post may go: after the queued ones
     minutes: int | None  # the interval in force
+    ahead: int = 0  # the queued posts that take the interval's next turns first
 
 
 def hour_minute(when):
     """a time as HH:MM in UTC"""
     return datetime.datetime.fromtimestamp(when, datetime.UTC).strftime('%H:%M')
+
+
+def local_time(when, now):
+    """a time as the owner's status line shows it, in this machine's zone: HH:MM, its day first (DD/MM HH:MM) when it
+    is not now's"""
+    day = time.strftime('%Y-%m-%d', time.localtime(when)) != time.strftime('%Y-%m-%d', time.localtime(now))
+    return time.strftime('%d/%m %H:%M' if day else '%H:%M', time.localtime(when))
+
+
+def mode_time(value):
+    """a mode's time in seconds: a whole number and its unit (MODE_UNITS), 1 minute to MOST_MODE; None for any other"""
+    found = re.fullmatch(r'([0-9]{1,5})([mhd])', value) if isinstance(value, str) else None
+    seconds = int(found.group(1)) * MODE_UNITS[found.group(2)] if found else 0
+    return seconds if 0 < seconds <= MOST_MODE else None
 
 
 def shown(value):
@@ -967,6 +1052,15 @@ def command_text(settings):
             "text passes the pre-harness first (tokens, keys, this machine's paths, private addresses, e-mails, title "
             'IDs), and anything about DraVee himself is his to allow, in a draft. '
         )
+    if identity.modes:
+        said += (
+            f'/{command} mode says where the owner is, each change a notice with mode and until: casa (home), as '
+            f'above; trabalho (work): no drafts, the interval {AWAY_MINUTES} min ({AWAY_MINUTES * 2} with the quota '
+            'or the context high, no agents), a direct post it holds back is queued and goes at its turn (status '
+            '"queued" says when; kind="queued" when it went or failed), and a post without direct is held until he is '
+            'home (status "held"); dormindo (asleep): as trabalho, and what was held reaches him in one summary. '
+            f'/{command} approver: someone whose DMs get each draft too; the first answer, his or theirs, decides. '
+        )
     return said + (
         'A message of anyone but the owner that the pre-harness rejects (invisible letters, a language other than '
         'English) never reaches you: a kind="notice" names who and the rule, and the server answers it. When a '
@@ -1008,8 +1102,10 @@ def instructions(settings):
             f'reply to one of its messages) that he put his :{WIMSY}: reaction on, or any he replied to while '
             f'mentioning {me}. '
         )
-        + greeting_text(settings)
+        # the greeting after the command: Claude Code (2.1.318) shows its model the first 4094 letters of these, and
+        # the session is told nothing of a greeting
         + command_text(settings)
+        + greeting_text(settings)
         + reacting_text(settings.identity)
     )
     if settings.identity.claude:
@@ -1457,7 +1553,71 @@ SHAPES = {
         '[channel id, playful or serious]',
         lambda item: isinstance(item, list) and len(item) == 2 and an_id(item[0]) and item[1] in TONE_MODES,
     ),
+    'mode': (
+        '{"mode": casa, trabalho or dormindo, "since", "until": a time, or null until the next change}',
+        lambda item: (
+            isinstance(item, dict)
+            and set(item) == {'mode', 'since', 'until'}
+            and item['mode'] in MODES
+            and stamp(item['since'])
+            and (item['until'] is None or stamp(item['until']))
+        ),
+    ),
+    'approver': (
+        '{"id", "name", "since", "until"}',
+        lambda item: (
+            isinstance(item, dict)
+            and set(item) == {'id', 'name', 'since', 'until'}
+            and an_id(item['id'])
+            and isinstance(item['name'], str)
+            and stamp(item['since'])
+            and stamp(item['until'])
+        ),
+    ),
+    'queue': (
+        '{"mark", "since", "pid": the server that queued it, "channel", "reply_to": an id or null, "text"}',
+        lambda item: (
+            isinstance(item, dict)
+            and set(item) == {'mark', 'since', 'pid', 'channel', 'reply_to', 'text'}
+            and a_mark(item['mark'])
+            and stamp(item['since'])
+            and isinstance(item['pid'], int)
+            and not isinstance(item['pid'], bool)
+            and an_id(item['channel'])
+            and (item['reply_to'] is None or an_id(item['reply_to']))
+            and a_text(item['text'])
+        ),
+    ),
+    'held': (
+        (
+            '{"mark", "since", "mode": trabalho or dormindo, "channel", "reply_to": an id or null, "text", "files": '
+            '[absolute path, ...]}'
+        ),
+        lambda item: (
+            isinstance(item, dict)
+            and set(item) == {'mark', 'since', 'mode', 'channel', 'reply_to', 'text', 'files'}
+            and a_mark(item['mark'])
+            and stamp(item['since'])
+            and item['mode'] in MODES[1:]
+            and an_id(item['channel'])
+            and (item['reply_to'] is None or an_id(item['reply_to']))
+            and a_text(item['text'])
+            and isinstance(item['files'], list)
+            and len(item['files']) <= MOST_FILES
+            and all(isinstance(path, str) and os.path.isabs(path) for path in item['files'])
+        ),
+    ),
 }
+
+
+def a_mark(value):
+    """whether a value is the mark of a post the bot keeps a turn or a place for: 32 hex letters"""
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{32}', value) is not None
+
+
+def a_text(value):
+    """whether a value is a post's text: 1 to LIMIT letters"""
+    return isinstance(value, str) and 0 < len(value) <= LIMIT
 
 
 def a_person(item):
@@ -1660,11 +1820,14 @@ def quoting(message, owner, me, roles):
     return (message.get('message_reference') or {}).get('message_id')
 
 
-def footer(kind, channel, reply_to):
-    return f'{kind}: to {channel}' + (f' replying to {reply_to}' if reply_to else '')
+def footer(kind, channel, reply_to, twin=None):
+    """a draft's state as its card's footer says it; twin: (channel, id) of its copy in the approver's DMs, or of the
+    owner's draft on the copy"""
+    said = f'{kind}: to {channel}' + (f' replying to {reply_to}' if reply_to else '')
+    return said + (f' twin {twin[0]}/{twin[1]}' if twin else '')
 
 
-def waiting_card(where, reply_to, note=''):
+def waiting_card(where, reply_to, note='', twin=None):
     """the card under a draft's text: where it goes, and how the owner answers"""
     channel, name = where['id'], where.get('name') or where['id']
     lines = [f'Channel: #{name} ({channel})']
@@ -1676,7 +1839,7 @@ def waiting_card(where, reply_to, note=''):
     return {
         'title': f'Draft for #{name}',
         'description': '\n'.join(lines),
-        'footer': {'text': footer('waiting', channel, reply_to)},
+        'footer': {'text': footer('waiting', channel, reply_to, twin)},
     }
 
 
@@ -1697,7 +1860,8 @@ def draft_state(message):
         }
     found = WAITING.fullmatch(text)
     if found:
-        return {'kind': found.group(1), 'channel': found.group(2), 'reply_to': found.group(3)}
+        twin = found.group(4) and (found.group(4), found.group(5))
+        return {'kind': found.group(1), 'channel': found.group(2), 'reply_to': found.group(3), 'twin': twin or None}
     return None
 
 
@@ -1804,7 +1968,7 @@ class Hub:
 
 
 def command_list(identity):
-    """the application commands the bot registers in each server it is in: its command and SUBCOMMANDS, which every
+    """the application commands the bot registers in each server it is in: its command and subcommands, which every
     member sees (default_member_permissions null), as Discord sets it for a whole command"""
     if not identity.command:
         return []
@@ -1821,6 +1985,51 @@ def command_list(identity):
         'required': True,
         'choices': [{'name': f'{name} ({count} an hour)', 'value': name} for name, count in WEIGHTS.items()],
     }
+    modes = [
+        {
+            'type': SUB_COMMAND,
+            'name': 'mode',
+            'description': f"DraVee only: where you are, which sets how {identity.who}'s posts go",
+            'options': [
+                {
+                    'type': STRING_OPTION,
+                    'name': 'mode',
+                    'description': (
+                        'casa: drafts as before; trabalho: no drafts, a faster interval; dormindo: one summary'
+                    ),
+                    'required': True,
+                    'choices': [
+                        {'name': f'{mode} ({where})', 'value': mode}
+                        for mode, where in zip(MODES, ('home', 'work', 'asleep'), strict=True)
+                    ],
+                },
+                {
+                    'type': STRING_OPTION,
+                    'name': 'time',
+                    'description': (
+                        'For how long, as 30m, 8h or 1d (7d at most), then casa; until you change it without one'
+                    ),
+                },
+            ],
+        },
+        {
+            'type': SUB_COMMAND_GROUP,
+            'name': 'approver',
+            'description': f"DraVee only: someone whose check mark posts {identity.who}'s drafts too",
+            'options': [
+                {
+                    'type': SUB_COMMAND,
+                    'name': 'on',
+                    'description': 'DraVee only: they get each draft in their DMs too, and the first answer decides',
+                    'options': [
+                        user('Who approves'),
+                        dict(time_option, choices=[item for item in times if item['value'] in APPROVE_TIMES]),
+                    ],
+                },
+                {'type': SUB_COMMAND, 'name': 'off', 'description': 'DraVee only: your drafts go to you alone'},
+            ],
+        },
+    ]
     return [
         {
             'type': CHAT_INPUT,
@@ -1905,9 +2114,15 @@ def command_list(identity):
                         },
                     ],
                 },
+                *(modes if identity.modes else []),
             ],
         }
     ]
+
+
+def subcommands(identity):
+    """the names of an identity's subcommands, help first: SUBCOMMANDS, and MODE_SUBCOMMANDS with modes"""
+    return SUBCOMMANDS + (MODE_SUBCOMMANDS if identity.modes else ())
 
 
 def command_shape(command):
@@ -1935,10 +2150,17 @@ def command_shape(command):
 
 
 def subcommand(event):
-    """an interaction's subcommand and the values of its options: (its name or None, {option: value})"""
+    """an interaction's subcommand, a group's with the group's name first ("approver on"), and the values of its
+    options: (its name or None, {option: value})"""
     options = (event.get('data') or {}).get('options') or []
-    first = options[0] if options and isinstance(options[0], dict) and options[0].get('type') == SUB_COMMAND else {}
-    return first.get('name'), {item.get('name'): item.get('value') for item in first.get('options') or []}
+    first = options[0] if options and isinstance(options[0], dict) else {}
+    group = None
+    if first.get('type') == SUB_COMMAND_GROUP:
+        group, inner = first.get('name'), first.get('options') or []
+        first = inner[0] if inner and isinstance(inner[0], dict) else {}
+    first = first if first.get('type') == SUB_COMMAND else {}
+    name = f'{group} {first.get("name")}' if group and first.get('name') else group or first.get('name')
+    return name, {item.get('name'): item.get('value') for item in first.get('options') or []}
 
 
 def invoker(event):
@@ -2020,6 +2242,87 @@ class Wimsy:
         if 'dm' not in self.known:
             self.known['dm'] = self.discord('POST', '/users/@me/channels', {'recipient_id': self.settings.owner})['id']
         return self.known['dm']
+
+    def dm_with(self, user):
+        """the bot's DM channel with a user, asked once: an approver's"""
+        if user == self.settings.owner:
+            return self.dm()
+        dms = self.known.setdefault('dms', {})
+        if user not in dms:
+            dms[user] = self.discord('POST', '/users/@me/channels', {'recipient_id': user})['id']
+        return dms[user]
+
+    def mode_item(self, now=None, items=None):
+        """the mode the owner set, as mode.json has it, while it runs; None for casa, the default, and once a mode set
+        for a time ran out (items: mode.json's, read under the lock)"""
+        if not self.settings.identity.modes:
+            return None
+        now = self.store.now() if now is None else now
+        items = self.store.cached('mode') if items is None else items
+        item = items[-1] if items else None
+        return item if item and (item['until'] is None or item['until'] > now) else None
+
+    def mode_of(self, now=None, items=None):
+        """the mode in force: casa, trabalho or dormindo"""
+        item = self.mode_item(now, items)
+        return item['mode'] if item else HOME
+
+    def approver_item(self, now=None, items=None):
+        """the approver the owner set, as approver.json has it, while their time runs; None for no one"""
+        if not self.settings.identity.modes:
+            return None
+        now = self.store.now() if now is None else now
+        items = self.store.cached('approver') if items is None else items
+        item = items[-1] if items else None
+        return item if item and item['until'] > now else None
+
+    def held_words(self, mode):
+        """what becomes of a post without direct in a mode away from home, in words"""
+        then = 'in one summary' if mode == 'dormindo' else 'as a draft'
+        return f'held until the owner is home (mode {mode}), then {then}'
+
+    def instead(self, mode):
+        """what a direct post refused may do instead, in a mode"""
+        if mode == HOME:
+            return 'post it without direct, as a draft the owner sees'
+        return f'post it without direct: it is {self.held_words(mode)}'
+
+    def status_line(self, now, modes=None, approvers=None):
+        """the mode and the approver as the owner's status line shows them, in Portuguese as the rest of it: 'aogo:
+        trabalho ate 23:00, aprova Liz ate 16/11 14:07' (modes and approvers: their files' items read under the
+        lock)"""
+        item, approver = self.mode_item(now, modes), self.approver_item(now, approvers)
+        said = f'{self.settings.identity.command}: {item["mode"] if item else HOME}'
+        if item and item['until'] is not None:
+            said += f' ate {local_time(item["until"], now)}'
+        if approver:
+            name = re.sub(r'[\x00-\x1f\x7f]', '', approver['name'])[:32] or approver['id']
+            said += f', aprova {name} ate {local_time(approver["until"], now)}'
+        return said
+
+    def keep_line(self, now, force=False, modes=None, approvers=None):
+        """the state folder's LINE_FILE, written when what it says changed, with force, or once older than
+        LINE_FRESH; True when written"""
+        if not self.settings.identity.modes:
+            return False
+        path, said = self.store.folder / LINE_FILE, self.status_line(now, modes, approvers) + '\n'
+        try:
+            found = path.stat()
+            same = path.read_text(encoding='utf-8') == said and time.time() - found.st_mtime < LINE_FRESH
+        except (OSError, UnicodeDecodeError):
+            same = False
+        if same and not force:
+            return False
+        private_folder(self.store.folder)
+        part = self.store.folder / f'.{LINE_FILE}.part'
+        try:
+            with open(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w', encoding='utf-8') as out:
+                out.write(said)
+            os.replace(part, path)
+        except OSError:
+            part.unlink(missing_ok=True)
+            raise
+        return True
 
     def allowed(self):
         """the people the owner allowed with his command, their allow still running: {id: its item}"""
@@ -2401,15 +2704,17 @@ class Wimsy:
         where = self.where(channel, reading=False)
         if reply_to:
             self.discord('GET', f'/channels/{channel}/messages/{reply_to}')
-        dm = self.dm()
-        body = {'content': text, 'embeds': [waiting_card(where, reply_to)], 'allowed_mentions': {'parse': []}}
-        if files:
-            body['attachments'] = [{'id': place, 'filename': name} for place, (name, _, _) in enumerate(files)]
-        draft = self.discord('POST', f'/channels/{dm}/messages', body, files)['id']
-        self.made.add(draft)
-        for emoji in (YES, NO):
-            self.discord('PUT', f'/channels/{dm}/messages/{draft}/reactions/{urllib.parse.quote(emoji)}/@me')
-        return self.verdict(draft, wait, cancelled, progress)
+        now = self.store.now() if self.store else 0.0
+        mode = self.mode_of(now) if self.settings.identity.modes else HOME
+        if mode != HOME:
+            if args.get('wait') is not None:
+                raise Refused(
+                    f"wait is for the owner's answer to a draft, and in mode {mode} none is made now: take it out"
+                )
+            return self.hold(channel, text, reply_to, args.get('files'), mode, now)
+        draft, copy = self.draft(where, text, reply_to, files, now)
+        got = self.verdict(draft, wait, cancelled, progress)
+        return got if copy is None else dict(got, approver=copy)
 
     def follow_session(self):
         """the newest status line file of this server's Claude Code, by the claude_pid the status line writes in it,
@@ -2457,14 +2762,20 @@ class Wimsy:
         return self.statusline
 
     def pace(self, now):
-        """the interval in force for the direct posts that need one, from Claude Code's statusline.json: its base,
-        doubled for the quota, the context and this session's agents each, halved with the quota under the week's
-        share gone, within DIRECT_RANGE; none at QUOTA_STOP, nor with a file missing, stale or another session's"""
+        """the interval in force for the direct posts that need one, from Claude Code's statusline.json: at home its
+        base, doubled for the quota, the context and this session's agents each, halved with the quota under the
+        week's share gone; away (trabalho, dormindo) AWAY_MINUTES, doubled once for the quota or the context; within
+        DIRECT_RANGE; none at QUOTA_STOP, nor with a file missing, stale or another session's, nor with the mode
+        unknown"""
         path, base = self.status_file(), self.settings.direct_minutes
         if not self.settings.identity.claude:  # Grok Build reports no quota, context nor agents: a fixed interval
             return Pace(
                 base, f'{self.settings.identity.key("DIRECT_MINUTES")} {base}, fixed: its client reports no quota'
             )
+        try:
+            mode = self.mode_of(now)
+        except (Refused, OSError) as error:
+            return Pace(None, f'the mode cannot be read: {error}')
         try:
             found = path.stat()
             data = json.loads(path.read_text(encoding='utf-8'))
@@ -2501,6 +2812,8 @@ class Wimsy:
         for name, value in values.items():
             if not stamp(value):
                 return Pace(None, f'{path} has {name} {shown(value)}, not a number: the interval cannot be weighed')
+        if mode != HOME:
+            return self.away_pace(mode, week['used_percentage'], five, context['used_percentage'])
         transcript = data.get('transcript_path')
         if not isinstance(transcript, str) or not transcript:
             return Pace(
@@ -2534,11 +2847,28 @@ class Wimsy:
             why += f': {raw:g} min, held within {DIRECT_RANGE[0]} to {DIRECT_RANGE[1]}'
         return Pace(minutes, why)
 
-    def way(self, where, message, now, pace=None, records=None):
+    def away_pace(self, mode, used, five, context):
+        """the interval away from home: AWAY_MINUTES, doubled once when the quota or the context is high, the agents
+        not counted; none at QUOTA_STOP"""
+        quota, which = (five, 'five_hour') if five is not None and five > used else (used, 'seven_day')
+        if quota >= QUOTA_STOP:
+            return Pace(None, f'quota {quota:g}% ({which}): at {QUOTA_STOP}% or more no interval post goes direct')
+        high = [
+            words
+            for slow, words in (
+                (quota >= QUOTA_SLOW, f'quota {quota:g}%'),
+                (context >= CONTEXT_SLOW, f'context {context:g}%'),
+            )
+            if slow
+        ]
+        minutes = AWAY_MINUTES * (2 if high else 1)
+        return Pace(minutes, f'mode {mode}, ' + (f'{" and ".join(high)} x2' if high else f'quota {quota:g}%'))
+
+    def way(self, where, message, now, pace=None, records=None, queued=None):
         """how the session's text may go to a channel (where, as Discord gives it), replying to message (None for
         none): direct for the owner's message and a trusted person's, REPLIES at most each (in DMs, the owner's alone);
-        once an interval for an allowed person's, its own or none; a draft only for anything else. records: the direct
-        posts read under the lock, for a post"""
+        once an interval for an allowed person's, its own or none, after the posts queued; a draft only for anything
+        else. records and queued: the direct posts and the queue read under the lock, for a post"""
         settings, identity = self.settings, self.settings.identity
 
         def draft(why):
@@ -2585,16 +2915,26 @@ class Wimsy:
         if pace.minutes is None:
             return draft(pace.why)
         last = max((item[0] for item in records if item[3] == 'interval'), default=None)
-        return Way('interval', pace.why, 0, now if last is None else max(now, last + pace.minutes * 60), pace.minutes)
+        if queued is None:
+            queued = self.store.cached('queue') if identity.modes else []
+        turn = pace.minutes * 60
+        first = now if last is None else max(now, last + turn)
+        return Way('interval', pace.why, 0, first + len(queued) * turn, pace.minutes, len(queued))
 
     def reply_words(self, way, now):
-        """how the session's answer may go, in words: the reply attribute"""
-        if way.rule is None:
-            return f'draft only: {way.why}'
-        if way.rule != 'interval':
+        """how the session's answer may go in the mode in force, in words: the reply attribute"""
+        if way.rule is not None and way.rule != 'interval':
             return f'direct, up to {REPLIES}' if way.left == REPLIES else f'direct, {way.left} of {REPLIES} left'
-        when = 'now' if way.next <= now else f'from {hour_minute(way.next)} UTC'
-        return f'direct {when} (interval {way.minutes} min: {way.why})'
+        if way.rule == 'interval' and way.next <= now:
+            return f'direct now (interval {way.minutes} min: {way.why})'
+        mode = self.mode_of(now)  # read only where it changes the words
+        if way.rule is None:
+            return f'draft only: {way.why}' if mode == HOME else f'draft only, {self.held_words(mode)}: {way.why}'
+        if mode == HOME:
+            when = f'direct from {hour_minute(way.next)} UTC'
+        else:
+            when = f'direct, queued until {hour_minute(way.next)} UTC'
+        return f'{when} (interval {way.minutes} min: {way.why})'
 
     def about(self, message, kind, now=None, pace=None, where=None):
         """what a message's event and its discord_read item say of its author and of how to answer it, so the session
@@ -2627,7 +2967,10 @@ class Wimsy:
             said['weight'] = weight + (f' until {utc(standing.until)}' if standing.set and standing.until else '')
             said['heard'] = f'{self.hour_of(author, now)} of {WEIGHTS[standing.weight]} this hour'
         said['tone'] = self.tone_of(where, message)
-        said['reply'] = self.reply_words(self.way(where, message, now, pace), now)
+        try:
+            said['reply'] = self.reply_words(self.way(where, message, now, pace), now)
+        except (Refused, OSError) as error:  # the mode's or the queue's file: the message reaches the session still
+            said['reply'] = f'unknown: {error}'
         if standing.level != 'owner':
             ice = f'{standing.strikes} strike{"s" if standing.strikes != 1 else ""} of the last 7 days'
             said['ice'] = ice + (f', iced until {utc(standing.ice["until"])}' if standing.ice else '')
@@ -2672,7 +3015,11 @@ class Wimsy:
         """a post that goes at once, with no draft, when the rules let it; else Refused naming the rule and, for the
         interval, when the next may go: the session sends the draft"""
         settings, identity = self.settings, self.settings.identity
-        instead = 'post it without direct, as a draft the owner sees'
+        try:  # the owner's and the trusted replies go whatever the mode
+            mode = self.mode_of()
+            instead = self.instead(mode)
+        except (Refused, OSError) as error:
+            mode, instead = None, f'and no draft is made either: {error}'
         if args.get('files') is not None:
             raise Refused(f'direct is true, and a direct post carries no files: {instead}')
         if args.get('wait') is not None:
@@ -2691,9 +3038,19 @@ class Wimsy:
         pace = Pace(way.minutes, way.why) if way.rule == 'interval' else None
         with self.store.locked():
             records = [item for item in self.store.load('direct') if item[0] > now - HEARD_FOR]
-            way = self.way(where, message, now, pace, records) if way.rule else way
+            queued = self.store.load('queue') if identity.modes else []
+            way = self.way(where, message, now, pace, records, queued) if way.rule else way
             if way.rule is None:
                 raise Refused(f'this text goes as a draft, not direct: {way.why}; {instead}')
+            if way.rule == 'interval' and way.next > now and mode not in (HOME, None):
+                return self.enqueue(queued, mark, channel, reply_to, text, way, mode, now)
+            if way.rule == 'interval' and way.next > now and way.ahead:
+                many = f'{way.ahead} queued posts go' if way.ahead > 1 else '1 queued post goes'
+                raise Refused(
+                    f'this text goes as a draft, not direct: {many} first, at the interval of {way.minutes} min '
+                    f'({way.why}), so the next goes direct from {hour_minute(way.next)} UTC ({utc(way.next)}); '
+                    f'{instead}, or wait'
+                )
             if way.rule == 'interval' and way.next > now:
                 last = way.next - way.minutes * 60
                 raise Refused(
@@ -2724,6 +3081,191 @@ class Wimsy:
         else:
             got['left'] = way.left - 1
         return got
+
+    def enqueue(self, queued, mark, channel, reply_to, text, way, mode, now):
+        """under the state's lock, away from home: a direct post the interval holds back, queued for its turn, which
+        this server's look (drain) posts; its place, and when it goes at the soonest"""
+        item = {
+            'mark': mark,
+            'since': now,
+            'pid': os.getpid(),
+            'channel': channel,
+            'reply_to': reply_to,
+            'text': text,
+        }
+        self.store.save('queue', queued + [item])
+        log(f'discord_post: queued for the interval (mode {mode}), {way.ahead} ahead, for channel {channel}')
+        return {
+            'status': 'queued',
+            'mark': mark,
+            'mode': mode,
+            'goes': utc(way.next),
+            'ahead': way.ahead,
+            'interval': f'{way.minutes} min: {way.why}',
+            'channel': channel,
+        }
+
+    def hold(self, channel, text, reply_to, files, mode, now):
+        """away from home: a post without direct held until the owner is home, when it becomes a draft (release)"""
+        item = {
+            'mark': uuid.uuid4().hex,
+            'since': now,
+            'mode': mode,
+            'channel': channel,
+            'reply_to': reply_to,
+            'text': text,
+            'files': list(files or []),
+        }
+        with self.store.locked():
+            held = self.store.load('held') + [item]
+            self.store.save('held', held)
+        until = (self.mode_item(now) or {}).get('until')
+        log(f'discord_post: held for casa (mode {mode}), {len(held)} held, for channel {channel}')
+        return {
+            'status': 'held',
+            'mark': item['mark'],
+            'mode': mode,
+            'until': None if until is None else utc(until),
+            'held': len(held),
+            'goes': (
+                f"{self.held_words(mode)} in the owner's DMs"
+                + (f'; mode {mode} runs until {utc(until)}' if until else '')
+            ),
+            'channel': channel,
+        }
+
+    def draft(self, where, text, reply_to, files, now, silent=False):
+        """a draft in the owner's DMs, with the check mark and the cross, and its copy in the approver's DMs when one
+        is in force, each naming the other; silent: neither wakes its reader. (its id, what the copy got in words, or
+        None with no approver)"""
+        dm, owner = self.dm(), self.settings.owner
+        approver = self.approver_item(now)
+        note = ''
+        if approver:
+            note = f'<@{approver["id"]}> has it too, until {when_markup(approver["until"])}: the first answer decides.'
+        body = {'content': text, 'embeds': [waiting_card(where, reply_to, note)], 'allowed_mentions': {'parse': []}}
+        if silent:
+            body['flags'] = SILENT
+        if files:
+            body['attachments'] = [{'id': place, 'filename': name} for place, (name, _, _) in enumerate(files)]
+        draft = self.discord('POST', f'/channels/{dm}/messages', body, files)['id']
+        self.made.add(draft)
+        for emoji in (YES, NO):
+            self.discord('PUT', f'/channels/{dm}/messages/{draft}/reactions/{urllib.parse.quote(emoji)}/@me')
+        if approver is None:
+            return draft, None
+        whom = f'{approver["name"]} ({approver["id"]})'
+        try:
+            theirs = self.dm_with(approver['id'])
+            mine = f'<@{owner}> has it too: the first answer, his or yours, decides. Yours counts until '
+            card = waiting_card(where, reply_to, mine + f'{when_markup(approver["until"])}.', twin=(dm, draft))
+            copy = self.discord('POST', f'/channels/{theirs}/messages', dict(body, embeds=[card]), files)['id']
+            self.made.add(copy)
+            for emoji in (YES, NO):
+                self.discord('PUT', f'/channels/{theirs}/messages/{copy}/reactions/{urllib.parse.quote(emoji)}/@me')
+        except DiscordError as error:
+            return draft, f'not sent to {whom}: {error}; the owner alone answers it'
+        try:
+            self.edit(dm, draft, waiting_card(where, reply_to, note, twin=(theirs, copy)))
+        except DiscordError as error:
+            return (
+                draft,
+                f'sent to {whom} as {copy}, but the draft does not name it, so only theirs posts both: {error}',
+            )
+        return draft, f'sent to {whom} too, whose answer counts until {utc(approver["until"])}'
+
+    def release(self):
+        """once the owner is home, every post held for casa, taken by the first server to look: each a draft in his
+        DMs, and in the approver's; held while he slept (dormindo), the drafts silent and one summary that wakes him.
+        [(item, the channel as Discord gives it or None, the draft or None, what its copy got or None, the error or
+        None)]; [] while he is away or nothing is held"""
+        now = self.store.now()
+        with self.store.locked():
+            if self.mode_of(now, self.store.load('mode')) != HOME:
+                return []
+            held = self.store.load('held')
+            if not held:
+                return []
+            self.store.save('held', [])
+        quiet = any(item['mode'] == 'dormindo' for item in held)
+        done = []
+        for item in held:
+            try:
+                where = self.where(item['channel'], reading=False)
+                if item['reply_to']:
+                    self.discord('GET', f'/channels/{item["channel"]}/messages/{item["reply_to"]}')
+                files = images(item['files'] or None, self.title)
+                draft, copy = self.draft(where, item['text'], item['reply_to'], files, now, silent=quiet)
+                done.append((item, where, draft, copy, None))
+            except (DiscordError, Refused) as error:
+                done.append((item, None, None, None, str(error)))
+        made = sum(1 for each in done if each[2])
+        log(f'held: {made} of {len(done)} held posts are drafts now' + (', with a summary' if quiet else ''))
+        if quiet:
+            try:
+                self.to_owner(self.summary(done), quiet=True)
+            except DiscordError as error:
+                raise DiscordError(
+                    f'{made} of {len(done)} held posts are drafts, but their summary did not go: {error}'
+                )
+        return done
+
+    def summary(self, done):
+        """what was held while the owner slept, for him, a line each: where it goes, its first PREVIEW letters and its
+        draft, or why none was made"""
+        dm = self.dm()
+        lines = [f'While you were away, {len(done)} post{"s" if len(done) != 1 else ""} waited for your {YES}:']
+        for place, (item, where, draft, _, error) in enumerate(done, 1):
+            text = ' '.join(item['text'].split())
+            text = text if len(text) <= PREVIEW else text[: PREVIEW - 3] + '...'
+            to = f'#{where.get("name") or item["channel"]}' if where else f'channel {item["channel"]}'
+            if item['reply_to'] and where:
+                to += f' replying to {link(where.get("guild_id"), item["channel"], item["reply_to"])}'
+            said = f'draft {link(None, dm, draft)}' if draft else f'no draft: {error}'
+            lines.append(f'{place}. {to}: "{text}"; {said}')
+        return '\n'.join(lines)
+
+    def drain(self):
+        """the first post this server queued (or a server that stopped) once the interval gives it its turn: posted
+        direct, its turn taken as post_direct takes one. (the item, the post's link or None, the error or None), or
+        None when no turn came"""
+        if not self.settings.identity.modes:
+            return None
+        now, mine = self.store.now(), os.getpid()
+        with self.store.locked():
+            queue = self.store.load('queue')
+            item = next((each for each in queue if each['pid'] == mine or not alive(each['pid'])), None)
+            if item is None:
+                return None
+            pace = self.pace(now)
+            records = [each for each in self.store.load('direct') if each[0] > now - HEARD_FOR]
+            last = max((each[0] for each in records if each[3] == 'interval'), default=None)
+            if pace.minutes is None or last is not None and last + pace.minutes * 60 > now:
+                return None
+            self.store.save('queue', [each for each in queue if each['mark'] != item['mark']])
+            self.store.save('direct', records + [[now, item['mark'], item['reply_to'], 'interval', None]])
+        channel, reply_to = item['channel'], item['reply_to']
+        body = {'content': item['text'], 'allowed_mentions': {'parse': [], 'replied_user': False}}
+        if reply_to:
+            body['message_reference'] = {'message_id': reply_to, 'channel_id': channel, 'fail_if_not_exists': True}
+        try:
+            where = self.where(channel, reading=False)  # today's list, not the one of the day it was queued
+            posted = self.discord('POST', f'/channels/{channel}/messages', body)['id']
+        except (DiscordError, Refused) as error:
+            with self.store.locked():  # its turn not taken: nothing went
+                self.store.save('direct', [each for each in self.store.load('direct') if each[1] != item['mark']])
+            log(f'discord_post: a queued post did not go to channel {channel}: {error}')
+            return item, None, str(error)
+        with self.store.locked():
+            items = self.store.load('direct')
+            self.store.save('direct', [each[:4] + [posted] if each[1] == item['mark'] else each for each in items])
+        where_to = link(where.get('guild_id'), channel, posted)
+        log(f'discord_post: queued, direct (interval), message {posted} in channel {channel}')
+        try:
+            self.keep_mentions(posted, item['text'], where_to)
+        except Refused as error:
+            return item, where_to, str(error)
+        return item, where_to, None
 
     def post_status(self, args, cancelled, progress):
         take(args, 'discord_post_status', ('draft',), ('wait',))
@@ -2771,25 +3313,71 @@ class Wimsy:
             progress(self.clock.now() - start, wait, f"waiting for the owner's answer to draft {draft}")
 
     def decide(self, dm, message, state):
-        """a waiting draft, under its lock: refused or posted when the owner has answered, else None"""
-        channel = state['channel']
-        yes, no = self.answer(dm, message)
+        """a waiting draft, under its lock: refused or posted once the owner answered it, or the approver in force
+        its copy, his answer first; else None. With a copy, the answer says by whom"""
+        channel, owner, twin = state['channel'], self.settings.owner, state['twin']
+        yes, no = self.answer(dm, message, owner)
+        who, copy = owner, self.discord('GET', f'/channels/{twin[0]}/messages/{twin[1]}') if twin else None
+        approver = None if yes or no or copy is None else self.counting(copy)
+        if approver:
+            yes, no = self.answer(copy['channel_id'], copy, approver)
+            who = approver
         if no:
-            card = {'title': 'Not sent', 'description': f'{NO}: not sent to channel {channel}.'}
-            card['footer'] = {'text': footer('not sent', channel, state['reply_to'])}
-            self.edit(dm, message['id'], card)
-            return {'status': 'not sent', 'channel': channel, 'draft': message['id']}
+            said = f'{NO}: not sent to channel {channel}.' + ('' if who == owner else f' {NO} by <@{who}>.')
+            card = {'title': 'Not sent', 'description': said}
+            self.edit(
+                dm, message['id'], dict(card, footer={'text': footer('not sent', channel, state['reply_to'], twin)})
+            )
+            got = {'status': 'not sent', 'channel': channel, 'draft': message['id']}
+            if copy is None:
+                return got
+            mark = footer('not sent', channel, state['reply_to'], (dm, message['id']))
+            return dict(got, by=who) | self.edit_copy(copy, dict(card, footer={'text': mark}))
         if yes:
-            return self.send(dm, message, state)
+            return self.send(dm, message, state, who, copy)
         return None
 
-    def answered(self, draft):
-        """the owner's answer the gateway brought, on a draft this server made and still waiting: posted or refused
-        at once, whether a tool waits on it or not; None for any other message of his DMs (another session's draft
-        waits for that session's look, or a discord_post_status)"""
+    def counting(self, copy, now=None):
+        """the approver whose answer on a draft's copy counts now: the one in force, in whose DMs the copy is; None
+        for no one"""
+        item = self.approver_item(now)
+        return item['id'] if item and self.dm_with(item['id']) == copy['channel_id'] else None
+
+    def edit_copy(self, copy, card):
+        """a copy's card changed as the draft's was: {} once done, else {"copy": why it still says what it said}; the
+        draft's answer stands either way"""
+        try:
+            self.edit(copy['channel_id'], copy['id'], card)
+        except DiscordError as error:
+            return {'copy': f"its copy in the approver's DMs ({copy['id']}) was not changed: {error}"}
+        return {}
+
+    def lapsed(self, copy):
+        """a copy's card, once its reader approves no more: their answer there counts no more, said once"""
+        card = dict((copy.get('embeds') or [{}])[0])
+        note = f"Your answer here counts no more: you approve no draft now, and <@{self.settings.owner}>'s decides."
+        if note in (card.get('description') or ''):
+            return
+        card['description'] = f'{card.get("description") or ""}\n{note}'.strip()
+        self.edit(copy['channel_id'], copy['id'], card)
+
+    def answered(self, draft, channel=None, reactor=None):
+        """the answer the gateway brought on a draft this server made and still waiting, the owner's on his, or on its
+        copy (channel: the approver's DMs) the reactor's: posted or refused at once, whether a tool waits on it or
+        not; None for any other message (another session's draft waits for that session's look, or a
+        discord_post_status). A copy's reader who approves no more changes nothing, and their copy says so"""
         if draft not in self.made:
             return None
         dm, me = self.dm(), self.me()
+        if channel is not None and channel != dm:
+            copy = self.discord('GET', f'/channels/{channel}/messages/{draft}')
+            state = draft_state(copy) if copy['author']['id'] == me else None
+            if state is None or state['kind'] != 'waiting' or not state['twin']:
+                return None
+            if self.counting(copy) != reactor:
+                self.lapsed(copy)
+                return None
+            draft = state['twin'][1]
         with self.lock(draft):
             message = self.discord('GET', f'/channels/{dm}/messages/{draft}')
             state = draft_state(message) if message['author']['id'] == me else None
@@ -2802,16 +3390,16 @@ class Wimsy:
         path = f'/channels/{channel}/messages/{message}/reactions/{urllib.parse.quote(emoji)}'
         return {user.get('id') for user in self.discord('GET', path, limit=PAGE)}
 
-    def answer(self, dm, message):
-        """whether the owner reacted with the check mark, and with the cross: another person's reaction, or
-        the bot's own, counts for nothing"""
+    def answer(self, channel, message, who):
+        """whether who (the owner, or the approver on a copy) reacted with the check mark, and with the cross: another
+        person's reaction, or the bot's own, counts for nothing"""
         said = {}
         for reaction in message.get('reactions') or []:
             emoji = reaction.get('emoji') or {}
             if emoji.get('id') is None and emoji.get('name') in (YES, NO):
                 others = reaction.get('count', 0) - (1 if reaction.get('me') else 0)
                 if others > 0:
-                    said[emoji['name']] = self.settings.owner in self.reactors(dm, message['id'], emoji['name'])
+                    said[emoji['name']] = who in self.reactors(channel, message['id'], emoji['name'])
         return said.get(YES, False), said.get(NO, False)
 
     def let_through(self, channel, message, me):
@@ -2827,13 +3415,14 @@ class Wimsy:
     def edit(self, dm, draft, card):
         self.discord('PATCH', f'/channels/{dm}/messages/{draft}', {'embeds': [card]})
 
-    def send(self, dm, message, state):
-        """posts an approved draft's text where it goes, then says on the draft where it went"""
-        draft, channel, reply_to = message['id'], state['channel'], state['reply_to']
+    def send(self, dm, message, state, who=None, copy=None):
+        """posts an approved draft's text where it goes, then says on the draft, and on its copy, where it went and,
+        with a copy, by whose check mark (who)"""
+        draft, channel, reply_to, twin = message['id'], state['channel'], state['reply_to'], state['twin']
         where = self.where(channel, reading=False)  # today's list, not the one of the day it was drafted
         name, guild = where.get('name') or channel, where.get('guild_id')
-        sending = waiting_card(where, reply_to)
-        sending.update(title=f'Sending to #{name}', footer={'text': footer('sending', channel, reply_to)})
+        sending = waiting_card(where, reply_to, twin=twin)
+        sending.update(title=f'Sending to #{name}', footer={'text': footer('sending', channel, reply_to, twin)})
         self.edit(dm, draft, sending)
         body = {'content': message['content'], 'allowed_mentions': {'parse': [], 'replied_user': False}}
         if reply_to:
@@ -2848,19 +3437,24 @@ class Wimsy:
             posted = self.discord('POST', f'/channels/{channel}/messages', body, files)['id']
         except DiscordError as error:
             try:
-                self.edit(dm, draft, waiting_card(where, reply_to, f'Posting failed: {error}'))
+                self.edit(dm, draft, waiting_card(where, reply_to, f'Posting failed: {error}', twin=twin))
             except DiscordError as second:
                 raise DiscordError(f'{error}; and draft {draft} still says sending: {second}') from None
             raise
         where_to = link(guild, channel, posted)
-        card = {'title': f'Sent to #{name}', 'description': f'Sent: {where_to}'}
+        by = '' if who in (None, self.settings.owner) else f'\n{YES} by <@{who}>.'
+        card = {'title': f'Sent to #{name}', 'description': f'Sent: {where_to}{by}'}
         card['footer'] = {'text': f'sent: {guild or "@me"}/{channel}/{posted}'}
         try:
             self.edit(dm, draft, card)
         except DiscordError as error:
             raise DiscordError(f'posted as {where_to}, but draft {draft} still says sending: {error}') from None
+        got = {'status': 'sent', 'link': where_to, 'message': posted, 'channel': channel, 'draft': draft}
+        if copy is not None:
+            said = dict(card, description=f'Sent: {where_to}\n{YES} by <@{who or self.settings.owner}>.')
+            got |= {'by': who or self.settings.owner} | self.edit_copy(copy, said)
         self.keep_mentions(posted, message['content'], where_to)
-        return {'status': 'sent', 'link': where_to, 'message': posted, 'channel': channel, 'draft': draft}
+        return got
 
     def read(self, args, cancelled, progress):
         take(args, 'discord_read', ('channel',), ('after', 'limit', 'from'))
@@ -3133,7 +3727,7 @@ class Wimsy:
                 error.status,
                 error.code,
             ) from None
-        log(f'commands: /{command} ({", ".join(SUBCOMMANDS)}) {status} in server {guild}')
+        log(f'commands: /{command} ({", ".join(subcommands(self.settings.identity))}) {status} in server {guild}')
         return status
 
     def command(self, event):
@@ -3146,9 +3740,11 @@ class Wimsy:
             done = next((item for item in kept if item[1] == number), None)
             if done:
                 return {'sub': sub, 'text': None, 'notice': done[2]}
-            text, notice, *dm = self.use(event, now)
+            text, notice, *rest = self.use(event, now)
             self.store.save('interactions', kept + [[now, number, notice]])
-        return {'sub': sub, 'text': text, 'notice': notice, 'dm': dm[0] if dm else None}
+        # rest: what goes after the answer, by this server alone: a DM to the owner, and whether the held posts go
+        dm, release = (rest + [None, False])[:2]
+        return {'sub': sub, 'text': text, 'notice': notice, 'dm': dm, 'release': release}
 
     def use(self, event, now):
         """under the state's lock: the answer to a use of the command and the notice for the session (None for
@@ -3157,10 +3753,15 @@ class Wimsy:
         (sub, values), asker = subcommand(event), invoker(event)
         if sub == 'help':
             return self.help(asker), None
-        if sub not in OWNERS_ALONE:
-            return f'/{command} {sub} is not a command of {self.title}: it has {", ".join(SUBCOMMANDS)}.', None
+        known = subcommands(settings.identity)
+        if (sub or '').split(' ')[0] not in known[1:]:
+            return f'/{command} {sub} is not a command of {self.title}: it has {", ".join(known)}.', None
         if asker != settings.owner:
             return f'Only <@{settings.owner}> can use /{command} {sub}.', None
+        if sub == 'mode':
+            return self.set_mode(values, now)
+        if sub.split(' ')[0] == 'approver':
+            return self.set_approver(event, sub.removeprefix('approver').strip(), values, now)
         if sub == 'allowed':
             return self.allowed_text(), None
         if sub == 'admins':
@@ -3210,18 +3811,143 @@ class Wimsy:
         )
         return answer, {'text': text, 'meta': {'kind': 'notice', 'user': name, 'user_id': target, 'ice': 'ended'}}
 
-    def to_owner(self, text):
+    def mode_words(self, item, shown_as):
+        """a mode as an answer or a notice names it: casa by default, or the mode set and how long it runs"""
+        if item is None:
+            return f'{HOME}, by default'
+        if item['until'] is None:
+            return f'{item["mode"]} until the next change'
+        return f'{item["mode"]} until {shown_as(item["until"])}, then {HOME}'
+
+    def set_mode(self, values, now):
+        """under the state's lock: the mode the owner sets, for a time or until the next change; casa lets out what
+        was held, after the answer (Discord takes it for 3 s)"""
+        mode, time_value = values.get('mode'), values.get('time')
+        items = self.store.load('mode')
+        before = self.mode_item(now, items)
+        was = self.mode_words(before, when_markup)
+        if mode not in MODES:
+            return f'mode is {shown(mode)}, not one of {", ".join(MODES)}: the mode is {was}.', None
+        seconds = None if time_value is None else mode_time(time_value)
+        if time_value is not None and seconds is None:
+            return (
+                f'time is {shown(time_value)}, not a time from 1m to 7d written as 30m, 8h or 1d: the mode is {was}.',
+                None,
+            )
+        if time_value is not None and mode == HOME:
+            return (
+                f'time is {shown(time_value)}, and {HOME} takes none: every mode returns to it. The mode is {was}.',
+                None,
+            )
+        held = self.store.load('held') if mode == HOME else []
+        summary = 'in one summary' if any(item['mode'] == 'dormindo' for item in held) else 'each a draft'
+        posts = f'{len(held)} post{"s" if len(held) != 1 else ""}'
+        if (before['mode'] if before else HOME) == mode and seconds is None and (before is None or not before['until']):
+            answer = f'The mode is {was} already.' + (
+                f' Held for casa: {posts}, in your DMs now, {summary}.' if held else ''
+            )
+            return answer, None, None, bool(held)
+        until = None if seconds is None else now + seconds
+        items = [{'mode': mode, 'since': now, 'until': until}]
+        self.store.save('mode', items)
+        after = self.mode_item(now, items)
+        answer = f'Mode {self.mode_words(after, when_markup)}: {MODE_MEANS[mode]}. It was {was}.'
+        text = (
+            f'The owner set mode {self.mode_words(after, utc)}: {MODE_MEANS[mode]}; it was '
+            f'{self.mode_words(before, utc)}.'
+        )
+        if held:
+            answer += f' Held for casa: {posts}, in your DMs now, {summary}.'
+            text += f' Held for casa: {posts}, which go to his DMs now, {summary}.'
+        line = self.line_note(now, modes=items)
+        answer, text = answer + line, text + line
+        meta = {
+            'kind': 'notice',
+            'mode': mode,
+            'until': 'next change' if until is None else utc(until),
+            'was': before['mode'] if before else HOME,
+        }
+        return answer, {'text': text, 'meta': meta}, None, mode == HOME
+
+    def set_approver(self, event, action, values, now):
+        """under the state's lock: the approver the owner sets for a time, whose DMs get each draft too, or takes
+        off"""
+        command, owner = self.settings.identity.command, self.settings.owner
+        items = self.store.load('approver')
+        before = self.approver_item(now, items)
+
+        def was(shown_as, named=False):
+            if before is None:
+                return 'no one'
+            who = f'{before["name"]} ({before["id"]})' if named else f'<@{before["id"]}>'
+            return f'{who} until {shown_as(before["until"])}'
+
+        if action not in ('on', 'off'):
+            return f'/{command} approver takes on (a user, and a time) or off.', None
+        if action == 'off':
+            if before is None:
+                return 'No one approves your drafts but you.', None
+            self.store.save('approver', [])
+            line = self.line_note(now, approvers=[])
+            answer = f'<@{before["id"]}> approves no more drafts; it ran until {when_markup(before["until"])}.{line}'
+            text = (
+                f'The owner took {before["name"]} ({before["id"]}) off as approver, which ran until '
+                f'{utc(before["until"])}: each draft goes to him alone.{line}'
+            )
+            meta = {'kind': 'notice', 'user': before['name'], 'user_id': before['id'], 'approver': 'off'}
+            return answer, {'text': text, 'meta': meta}
+        target, time_value = values.get('user'), values.get('time')
+        in_force = f'the approver is {was(when_markup)}'
+        if not an_id(target):
+            return f'user is {shown(target)}, not a member: /{command} approver on takes one; {in_force}.', None
+        if target == owner:
+            return f'<@{target}> is the owner, whose answer decides every draft already; {in_force}.', None
+        if target == self.me():
+            return f'<@{target}> is {self.title} itself; {in_force}.', None
+        resolved = ((event.get('data') or {}).get('resolved') or {}).get('users') or {}
+        if (resolved.get(target) or {}).get('bot'):
+            return f'<@{target}> is a bot, which answers no draft; {in_force}.', None
+        time_value = APPROVE_DEFAULT if time_value is None else time_value
+        if time_value not in APPROVE_TIMES:
+            return f'time is {shown(time_value)}, not one of {", ".join(APPROVE_TIMES)}: {in_force}.', None
+        until, name = now + APPROVE_TIMES[time_value], member_name(event, target)
+        items = [{'id': target, 'name': name, 'since': now, 'until': until}]
+        self.store.save('approver', items)
+        line = self.line_note(now, approvers=items)
+        answer = (
+            f'<@{target}> approves your drafts too, until {when_markup(until)}: each draft goes to their DMs as well, '
+            f'and the first answer, yours or theirs, decides; nothing else of theirs changes. It was '
+            f'{was(when_markup)}.{line}'
+        )
+        text = (
+            f'The owner made {name} ({target}) an approver until {utc(until)} ({ALLOW_NAMES[time_value]}): each draft '
+            'goes to their DMs too, and the first answer, his or theirs, decides; nothing else of theirs changes. It '
+            f'was {was(utc, named=True)}.{line}'
+        )
+        meta = {'kind': 'notice', 'user': name, 'user_id': target, 'approver': 'on', 'until': utc(until)}
+        return answer, {'text': text, 'meta': meta}
+
+    def line_note(self, now, modes=None, approvers=None):
+        """the status line's file written after a change, under the state's lock: '' once written, else why not"""
+        try:
+            self.keep_line(now, force=True, modes=modes, approvers=approvers)
+        except OSError as error:
+            return f' The status line could not be told: {error}.'
+        return ''
+
+    def to_owner(self, text, quiet=False):
         """a text of the server's in the owner's DMs, in messages of LIMIT letters at most cut between lines, pinging
-        no one"""
+        no one; quiet: only the first wakes him"""
         parts, part = [], ''
         for line in text.split('\n'):
             if part and len(part) + 1 + len(line) > LIMIT:
                 parts.append(part)
                 part = ''
             part = f'{part}\n{line}' if part else line[:LIMIT]
-        for each in [*parts, part]:
+        for place, each in enumerate([*parts, part]):
+            body = {'content': each, 'allowed_mentions': {'parse': []}}
             self.discord(
-                'POST', f'/channels/{self.dm()}/messages', {'content': each, 'allowed_mentions': {'parse': []}}
+                'POST', f'/channels/{self.dm()}/messages', body | ({'flags': SILENT} if quiet and place else {})
             )
 
     def people_text(self, now):
@@ -3539,6 +4265,7 @@ class Wimsy:
         text = said + '\n' + HELP_ASK.format(me=self.me())
         if asker == settings.owner:
             text += '\n' + HELP_OWNER.format(command=identity.command)
+            text += HELP_MODES.format(command=identity.command) if identity.modes else ''
         return text
 
     def respond(self, event, text):
@@ -3995,6 +4722,7 @@ class Ear:
         self.told_uses = set()  # the uses of the command whose notice the session got from this server
         self.started = tools.store.now() if tools.store else 0.0  # what ran out before it is not told
         self.trouble = None  # the last failure of a look at the people's state, said once
+        self.troubles = {}  # the last failure of each look at the mode's state (MODE_LOOKS), said once
 
     def feed(self, kind, data):
         """from the gateway's thread: never waits on Discord's REST there. A use of the command is answered in a
@@ -4018,7 +4746,8 @@ class Ear:
             self.sort(kind, data)
 
     def once(self):
-        """what the bot says once at its start: the env file's USERS deprecated, to the owner"""
+        """what the bot says once at its start: the env file's USERS deprecated, to the owner; and the mode, to his
+        status line"""
         try:
             self.tools.deprecated_users()
         except (DiscordError, Refused, OSError) as error:
@@ -4029,8 +4758,104 @@ class Ear:
                 'start',
                 {'kind': 'error'},
             )
+        if self.tools.settings.identity.modes:
+            self.look('line', lambda now: self.tools.keep_line(now, force=True))
 
     def tick(self):
+        """what changed with no event of its own: the people's state (people_tick), and with modes, a mode or an
+        approver that ran out, what was held once the owner is home, a queued post's turn and the status line"""
+        self.people_tick()
+        if self.tools.settings.identity.modes:
+            for name, step in (
+                ('ran out', self.ran_out),
+                ('held', lambda now: self.release()),
+                ('queue', lambda now: self.drain()),
+                ('line', self.tools.keep_line),
+            ):
+                self.look(name, step)
+
+    def look(self, name, step):
+        """one look at the mode's state; its failure said to the session once, until it is mended"""
+        try:
+            step(self.tools.store.now())
+        except (DiscordError, Refused, OSError) as error:
+            said = f'{self.title} could not look at {MODE_LOOKS[name]}: {error}'
+            if self.troubles.get(name) != said:
+                self.troubles[name] = said
+                log(f'{name}: {error}')
+                self.push(said, {'kind': 'error'})
+            return
+        self.troubles.pop(name, None)
+
+    def ran_out(self, now):
+        """a mode set for a time, or an approver, that ran out since this server started, told once"""
+        tools = self.tools
+        modes, approvers = tools.store.cached('mode'), tools.store.cached('approver')
+        item = modes[-1] if modes else None
+        ended = item and item['until'] is not None and self.started <= item['until'] <= now
+        if ended and ('mode', item['until']) not in tools.told:
+            tools.told.add(('mode', item['until']))
+            self.push(
+                f'Mode {item["mode"]} ran out at {utc(item["until"])}: the owner is {HOME} now, where '
+                f'{MODE_MEANS[HOME]}',
+                {'kind': 'notice', 'mode': HOME, 'until': 'next change', 'was': item['mode']},
+            )
+            self.told('notice')
+        item = approvers[-1] if approvers else None
+        if item and self.started <= item['until'] <= now and ('approver', item['until']) not in tools.told:
+            tools.told.add(('approver', item['until']))
+            self.push(
+                f'The approval of {item["name"]} ({item["id"]}) ran out at {utc(item["until"])}: each draft goes to '
+                'the owner alone',
+                {'kind': 'notice', 'user': item['name'], 'user_id': item['id'], 'approver': 'ended'},
+            )
+            self.told('notice')
+
+    def release(self):
+        """the held posts once the owner is home, as drafts (Wimsy.release), told to the session: each one's draft, or
+        why none was made and its text, to post again"""
+        done = self.tools.release()
+        if not done:
+            return
+        said = []
+        for item, _, draft, copy, error in done:
+            if draft:
+                said.append(f'held post {item["mark"]} is draft {draft}' + (f' (approver: {copy})' if copy else ''))
+            else:
+                said.append(
+                    f'held post {item["mark"]} for channel {item["channel"]} is no draft: {error}; its text: '
+                    f'{item["text"]}'
+                )
+        made = sum(1 for each in done if each[2])
+        self.push(
+            f'The owner is home: {made} of {len(done)} held posts are drafts in his DMs now'
+            + (', with one summary' if any(item['mode'] == 'dormindo' for item, *_ in done) else '')
+            + ': '
+            + '; '.join(said),
+            {'kind': 'notice', 'mode': HOME, 'released': str(len(done))},
+        )
+        self.told('notice')
+
+    def drain(self):
+        """a queued post whose turn came, posted (Wimsy.drain), told to the session: kind queued, sent or not sent"""
+        got = self.tools.drain()
+        if got is None:
+            return
+        item, where_to, error = got
+        queued = f'The post queued at {hour_minute(item["since"])} UTC'
+        if item['pid'] != os.getpid():
+            queued += ' by a server that stopped'
+        meta = {'kind': 'queued', 'mark': item['mark'], 'channel': item['channel']}
+        if where_to:
+            meta |= {'status': 'sent', 'message_id': where_to.rsplit('/', 1)[1]}
+            text = f'{queued} went direct: {where_to}' + (f'; {error}' if error else '')
+        else:
+            meta['status'] = 'not sent'
+            text = f'{queued} did not go to channel {item["channel"]}: {error}; its text, to post again: {item["text"]}'
+        self.push(text, meta)
+        self.told('queued')
+
+    def people_tick(self):
         """what changed in the people's state with no event of its own, told to the session once: a weight the owner
         set that ran out, an ice another server made, an ice that ran out"""
         store, now = self.tools.store, self.tools.store.now()
@@ -4324,14 +5149,20 @@ class Ear:
             self.told_uses.add(event['id'])
             self.push(notice['text'], notice['meta'])
             self.told('notice')
+        if got.get('release'):  # the owner is home: after the answer and its notice, what was held goes to him
+            self.look('held', lambda now: self.release())
 
     def reaction(self, event):
-        emoji = event.get('emoji') or {}
-        if event.get('user_id') != self.tools.settings.owner:
-            return
-        if not event.get('guild_id'):
-            if event['channel_id'] == self.tools.dm() and emoji.get('id') is None and emoji.get('name') in (YES, NO):
+        emoji, user, owner = event.get('emoji') or {}, event.get('user_id'), self.tools.settings.owner
+        if not event.get('guild_id'):  # in DMs: the owner's answer to a draft, or another's to its copy
+            if emoji.get('id') is not None or emoji.get('name') not in (YES, NO):
+                return
+            if user == owner and event['channel_id'] == self.tools.dm():
                 self.drafted(event['message_id'])
+            elif user not in (owner, self.tools.me()) and event['message_id'] in self.tools.made:
+                self.drafted(event['message_id'], event['channel_id'], user)
+            return
+        if user != owner:
             return
         if emoji.get('name') != WIMSY:
             return
@@ -4347,18 +5178,23 @@ class Ear:
         self.tools.approved.add(number)
         self.admit(dict(message, channel_id=channel, guild_id=event['guild_id']), 'approved', 'stranger')
 
-    def drafted(self, draft):
-        """the owner's check mark or cross on a waiting draft: it is posted or refused now, not on a tool's next look,
-        and the session is told"""
-        got = self.tools.answered(draft)
+    def drafted(self, draft, channel=None, reactor=None):
+        """the owner's check mark or cross on a waiting draft, or the approver's on its copy (channel, reactor): it is
+        posted or refused now, not on a tool's next look, and the session is told"""
+        got = self.tools.answered(draft, channel, reactor)
         if got is None:
             return
+        draft = got['draft']  # the owner's, which the session knows, though the answer came on its copy
         meta = {'kind': 'draft', 'draft': draft, 'status': got['status'], 'channel': got['channel']}
+        who = 'The owner'
+        if got.get('by') and got['by'] != self.tools.settings.owner:
+            meta['by'], who = got['by'], f'The approver ({got["by"]})'
+        tail = f'; {got["copy"]}' if got.get('copy') else ''
         if got['status'] == 'sent':
             meta['message_id'] = got['message']
-            self.push(f'The owner approved draft {draft}: posted as {got["link"]}', meta)
+            self.push(f'{who} approved draft {draft}: posted as {got["link"]}{tail}', meta)
         else:
-            self.push(f'The owner refused draft {draft}: not posted to channel {got["channel"]}', meta)
+            self.push(f'{who} refused draft {draft}: not posted to channel {got["channel"]}{tail}', meta)
         log(f'channel: draft {got["status"]}')
 
     def tell(self, message, kind, quoted=None):
@@ -4461,6 +5297,21 @@ def direct_text(identity):
         'send the draft yourself. No files. Returns JSON {"status": "sent", "direct": "owner", "trusted" or '
         '"interval", "link", "message", "channel", and "left" (replies left to that message) or "next" and '
         '"interval"}.'
+    )
+
+
+def modes_text(identity):
+    """what discord_post says of the owner's modes and the approver: for a bot without them, nothing"""
+    if not identity.modes:
+        return ''
+    return (
+        f" In the owner's mode trabalho or dormindo (/{identity.command} mode), a direct post the interval holds back "
+        'is queued, not refused: {"status": "queued", "mark", "mode", "goes" (when, at the soonest), "ahead" (the '
+        'posts queued before it), "interval", "channel"}, and a kind="queued" event says when it went, or why not and '
+        'its text; a post without direct makes no draft then but is held until he is home (casa): {"status": "held", '
+        '"mark", "mode", "until" (the mode\'s end, or null), "held" (how many), "goes", "channel"}, and wait is an '
+        f'error. With an approver (/{identity.command} approver on), the draft goes to their DMs too: the answer '
+        'carries "approver" (what their copy got) and, once one of them answered, "by" (whose answer it was).'
     )
 
 
@@ -4726,7 +5577,7 @@ def tool_list(identity):
             'additionalProperties': False,
         },
     }
-    tools[0]['description'] += direct_text(identity)
+    tools[0]['description'] += direct_text(identity) + modes_text(identity)
     tools[0]['inputSchema']['properties']['direct'] = {  # every identity's handler takes it: XujiWimsy to refuse it
         'type': 'boolean',
         'default': False,

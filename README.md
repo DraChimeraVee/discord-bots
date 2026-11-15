@@ -5,6 +5,7 @@
 * [AogoWimsy](#aogowimsy)
   * [Its slash command](#its-slash-command)
   * [Who reaches it, the pre-harness and direct posts](#who-reaches-it-the-pre-harness-and-direct-posts)
+  * [Where the owner is, and an approver](#where-the-owner-is-and-an-approver)
   * [As a channel](#as-a-channel)
 * [XujiWimsy](#xujiwimsy)
 * [Tests](#tests)
@@ -111,13 +112,16 @@ of it and never for a subcommand; each answer is seen by its asker alone and pin
 | `/aogo admins role` | the owner | that server's admin role, which the ice lines for a secret or abuse ping |
 | `/aogo people` | the owner | sends him, in his DMs with AogoWimsy, everyone with a state: trusted or allowed until when, mentioned by a post and until when their replies to it reach the session, their weight and until when, their ice and strikes of the last 7 days, and of the last 24 hours the messages that reached the session, were only counted, or were rejected by each rule, and the direct replies to theirs; then the interval in force and why, and the direct posts of the day |
 | `/aogo tone [channel mode]` | the owner | sets that channel's tone, `playful` (jokes are common there: light, short answers) or `serious` (focused work), a hint each of its messages carries to the session; a thread takes its channel's unless set itself. Alone, every channel's tone. Without one set, the server's #general (`1558959542543589416`) is playful, every other channel and DMs serious; in a playful channel a message that starts with `serio:` (any case, with or without the accent, after spaces or mentions) is serious. A channel without a mode, or a mode without one, is refused naming the tone in force |
+| `/aogo mode casa\|trabalho\|dormindo [time]` | the owner | where he is, which sets how a post goes that the interval holds back or that only his check mark lets out (below); `time` as `30m`, `8h` or `1d`, 7 days at most, then `casa`; without one, until the next change. `casa` by default. A mode or a time it does not take, and `casa` with a time, are refused naming the mode in force |
+| `/aogo approver on user [time]`, `/aogo approver off` | the owner | someone whose DMs get each draft too, for `2h`, `1d` or `7d` (`1d` without one), and the first answer, his or theirs, decides (below); `off` takes them off. The owner, the bot and another bot are refused naming the approver in force |
 
 Anyone but the owner who uses one of his is answered `Only @DraVee can use /aogo allow.`, and nothing changes. The owner
 is never limited, trusted or iced, and the bot is none of them. An allowed person's addressed messages and DMs reach the
 session (`kind="message"`; `discord_read`, `discord_wait` and `from` take them) until the allow runs out; then they are
 a stranger again (counted, greeted), and nothing is said to them. Each allow, deny, trust, untrust, weight and ice wakes
-the session as a `notice` naming the person and what changed, and each tone set as one naming the channel and the tone;
-help, allowed, admins, people and tone alone tell it nothing. Every session's server hears each use: the first to take
+the session as a `notice` naming the person and what changed, each tone set as one naming the channel and the tone,
+and each mode and approver set, or run out, as one naming the value in force and the one before; help, allowed, admins,
+people and tone alone tell it nothing. Every session's server hears each use: the first to take
 the state's lock answers it and writes down its answer and notice, the others see it answered and tell their session the
 same notice, so a use is answered once and each session hears it once. Discord takes an answer for 3 s: a use is
 answered in a thread of its own, ahead of whatever the gateway's queue holds, and the answer needs no Discord call
@@ -136,8 +140,11 @@ its change are made under the lock `state.lock` beside them, so one of them gree
 done. Beside them: `people.json` (each person's trust, weight, ice and strikes), `heard.json` (what became of each
 message of a trusted, allowed, let-through or mentioned person of the last day, so two sessions count it once), `direct.json` (each
 direct post of the last day, so they share the caps and the interval), `admins.json` (each server's admin role),
-`tones.json` (each channel's tone the owner set, where it differs from the one it has without it) and `flags.json` (the
-notes to the owner said once). A file there it did not write stops what reads it (the greetings, the help, the allows or
+`tones.json` (each channel's tone the owner set, where it differs from the one it has without it), `flags.json` (the
+notes to the owner said once), `mode.json` and `approver.json` (the mode and the approver the owner set, and until
+when), `queue.json` (each direct post queued for its turn: its text, where it goes, the pid of the server that queued
+it) and `held.json` (each post held for casa: its text, where it goes, its images' paths); and `line`, the one line the
+owner's status line shows (below). A file there it did not write stops what reads it (the greetings, the help, the allows or
 the commands), and each call or use then wakes the session as an `error` naming the file and what is wrong in it (a
 `tones.json` it cannot read makes each message's `tone` `unknown:` and why); nothing rewrites it until it is mended or
 removed. A draft waiting is its message in the owner's DMs, read again at each look, so a restart loses none; what the
@@ -169,7 +176,7 @@ posts are refused, naming the file and why. Doubled for the quota (seven days or
 more, the context at 80% or more, and 3 or more of this session's subagent transcripts written in the last 15 minutes,
 each; halved when none of those holds and the week's quota used is under the share of the week gone; held within 10
 minutes and 2 hours; at 95% quota no interval post goes direct (the owner's and the trusted replies still do). A direct
-post carries no files and pings no one.
+post carries no files and pings no one. Away from home (below) the interval is another.
 
 The pre-harness is `aogo/preharness.json`: rules, each with its direction (`in`, a message on its way to the session;
 `out`, a direct post's text), what it matches (a regex or a list of them, letters by code point with the emoji joiners
@@ -201,6 +208,45 @@ The ice's lines, the server's and never the session's, each pinging the owner:
 | `secret` | I don't share that. | yes |
 | `abuse` | Not here. | yes |
 | `injection` | I only take instructions from DraVee. | no |
+
+### Where the owner is, and an approver
+
+`/aogo mode` says where the owner is (DraVee, 2026-11-15: "precisa colocar as opcoes de quando to em casa, no trabalho,
+dormindo e quando permito outra pessoa aprovar"), and so how a post goes that the interval holds back or that only his
+check mark lets out:
+
+| Mode | The interval | A direct post past it | A post without direct (a draft) |
+|---|---|---|---|
+| `casa` (home, the default) | as above: 30 min, doubled for the quota, the context and the agents high | refused, naming when the next goes: the session sends a draft | a draft in his DMs, at once |
+| `trabalho` (work) | 10 min, 20 with the quota or the context high; the agents not counted; none at 95% quota | queued: `discord_post` answers `"status": "queued"` and when it goes at the soonest, and it goes direct at its turn | held until he is home (`"status": "held"`), then a draft in his DMs |
+| `dormindo` (asleep) | as `trabalho` | as `trabalho` | held until he is home, then drafts that wake no one and one summary that does |
+
+A mode set for a time runs that long, then `casa`; the session is told when it runs out. Once he is home (he sets
+`casa`, or a mode's time runs out), the first server to look makes every held post a draft, in his DMs and the
+approver's, and tells its session each one's draft id, or why none was made (the channel is not one it may post in now,
+the message it replied to is gone) with its text, to post again. Held while he slept, the drafts are silent and one
+summary lists each: where it goes, its first 80 letters and its draft's link. The owner's and the trusted replies go
+direct in every mode, as before. A queued post goes at its turn of the interval, the oldest first, posted by the ear of
+the server that queued it (or of any, once that one stopped: its session is told so), whatever the mode has become, as
+it was taken as a direct post; each wakes that session as `kind="queued"`, `sent` with its message id, or `not sent`
+with Discord's answer and its text. At home, a direct post past the interval goes after the queued ones. Each event's
+`reply` says the mode's way: `direct, queued until HH:MM UTC`, or `draft only, held until the owner is home (mode
+trabalho), then as a draft`.
+
+`/aogo approver on user [time]` makes someone an approver for `2h`, `1d` or `7d` (`1d` without one): each draft goes to
+their DMs too, a copy with its own check mark and cross, and each card names the other in its footer (`twin
+<channel>/<message>`). The first answer decides, the owner's on his or theirs on their copy, and both cards say what
+became of it and by whose answer; the session is told whose (`by`). Once their time runs out, or `/aogo approver off`,
+their answer on a copy counts no more, which that copy then says, and new drafts go to the owner alone. They get nothing
+else: no trust, no weight, no command. A copy Discord refuses (their DMs closed) is said in `discord_post`'s answer
+(`approver`), and the owner alone answers that draft. The approver's answers are heard by the server that made the
+draft, as the owner's are; another waits for `discord_post_status`.
+
+The owner's status line shows the mode (DraVee, 2026-11-15: "deixe disponivel pra mim ver na barra junto dos status da
+cpu e gpu"): the state folder's `line` holds `aogo: trabalho ate 23:00, aprova Liz ate 16/11 14:07` (the mode, its end
+and the approver's in this machine's time zone, a date before another day's), written at the start, at each change and
+again every 5 minutes while a server runs, so a status line that drops a line older than 15 minutes shows none once no
+server runs. XujiWimsy has neither the modes nor the approver.
 
 ### As a channel
 
@@ -371,7 +417,11 @@ each factor of the interval and its bounds, a statusline missing, stale or anoth
 refused post taking no turn; a mentioned person's replies: that post alone, 24 hours, 10 an hour, a draft only, the
 ice, the mute and the deny, a file it cannot read; each event's attributes and `/aogo people`; `/aogo tone`: the owner's alone, the
 default, threads, the `serio:` trigger in any case with or without its accent, the item kept only where it differs, a
-restart, the notice, an unreadable file or channel said in `tone`), and its gateway client against a fake gateway
+restart, the notice, an unreadable file or channel said in `tone`; `/aogo mode`: the owner's alone, each value refused
+named, a restart, its end told once, the interval away from home, the queue (its turn, a refused post giving its turn
+and text back, a stopped server's queue taken over), the held posts (a draft once home, one summary and silent drafts
+after sleep), a file it cannot read; `/aogo approver`: the copy, either check mark first, the cross, its end, a copy
+Discord refuses; the status line's file), and its gateway client against a fake gateway
 on 127.0.0.1 (identify, heartbeats and their ACKs, resume, the close codes that stop it, pings, messages in frames), and
 that lines from several threads never mix on stdout; XujiWimsy's env file and keys (the other bot's refused, and its
 example AogoWimsy's in its names), its server, instructions and tools in its own names (no drawn emoji: the unicode ones
