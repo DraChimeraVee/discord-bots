@@ -180,7 +180,7 @@ class Handshake(WithXuji):
         self.assertIn('XUJIWIMSY_CHANNELS lists', text)
         reacting = ('discord_react', 'discord_unreact', 'discord_quick')  # its own emojis: Reactions below
         # its command's tools (the allows, the ice) and its drawings' upload are Aogo's under /xuji and its own names
-        aogos = ()
+        aogos = ('discord_cancel',)  # the queue and the held posts are the owner's modes, AogoWimsy's alone
         as_aogo = json.loads(
             text.replace('XujiWimsy', 'AogoWimsy')
             .replace('XUJIWIMSY', 'AOGOWIMSY')

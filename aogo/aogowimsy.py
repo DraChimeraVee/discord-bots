@@ -34,6 +34,8 @@ the other one's bot. Its tools:
     discord_freeze       ices the author of a message that tried what the harness refuses: the server's fixed line
                          of the kind (ICE_LINES) as a reply, and their messages only counted for a time (AogoWimsy
                          alone)
+    discord_cancel       takes back, by the mark discord_post gave, a post queued for its turn or held for casa, before
+                         it goes; one that left already is an error saying how (AogoWimsy alone)
 
 AogoWimsy is also a Claude Code channel (experimental capability claude/channel): once the session is up it stays on
 Discord's gateway, and pushes into the session, as notifications/claude/channel, each message addressed to AogoWimsy
@@ -129,6 +131,7 @@ MENTION_HOURS hours; admins.json, each server's admin role; tones.json, each cha
 differs from the one it has without it; flags.json, the notes to the owner said once; mode.json, the mode the owner set
 and until when; approver.json, the approver and until when; queue.json, each direct post queued for its turn (its text,
 where it goes and the server's pid); held.json, each post held for casa (its text, where it goes and its images' paths);
+gone.json, how each queued or held post of the last day left its file (posted, a draft, taken back), for discord_cancel;
 and LINE_FILE, one line for the owner's status line (the mode, its end and the approver), written at the start, at each
 change and again each LINE_FRESH. A draft waiting is a message in the owner's DMs, read again at each look, and stderr
 says what ran or failed, never what was said nor who said it.
@@ -282,7 +285,8 @@ HELP_MODES = (  # an identity's with modes, after HELP_OWNER
     '\n/{command} mode casa|trabalho|dormindo [time]: where you are, which sets how my posts go; time as 30m, 8h or 1d '
     '(7d at most), until you change it without one; casa by default\n'
     '/{command} approver on user [time], /{command} approver off: someone who gets my drafts in their DMs too, and the '
-    'first answer, yours or theirs, decides; time 2h, 1d or 7d, 1d without one'
+    'first answer, yours or theirs, decides; time 2h, 1d or 7d, 1d without one\n'
+    'A post I queued or held for casa I take back before it goes when you ask me (discord_cancel)'
 )
 ALLOW_TIMES = {'2h': 2 * 3600, '1d': 24 * 3600, '7d': 7 * 24 * 3600, 'perm': None}  # seconds; None: until denied
 ALLOW_NAMES = {'2h': '2 hours', '1d': '1 day', '7d': '7 days', 'perm': 'permanent'}  # as Discord's picker shows them
@@ -385,6 +389,7 @@ UNREAD = {  # what stops while a state file cannot be read, until it is mended o
     'approver': 'no draft is made, and no approver is shown',
     'queue': 'no post is queued, and none queued goes',
     'held': 'no post is held, and none held is released',
+    'gone': 'no post is taken back, none queued goes and none held is released',
 }
 YES, NO, EYES, THUMBS = chr(0x2705), chr(0x274C), chr(0x1F440), chr(0x1F44D)
 # The owner's custom emoji (DraVee, 2026-10-21: "se alguem te citar, eu posso (somente eu) so responder com um
@@ -1057,11 +1062,11 @@ def command_text(settings):
     if identity.modes:
         said += (
             f'/{command} mode says where the owner is (a notice at each change): casa (home), as above; trabalho '
-            f'(work): the interval {AWAY_MINUTES} min, {AWAY_MINUTES * 2} with the quota or the context high; a direct '
-            'post it holds back is queued for its turn (status "queued" says when, kind="queued" once it went or '
-            'failed); a post without direct is held for casa (status "held"), or with an approver is their draft at '
-            'once; dormindo (asleep): as trabalho, and what was held reaches him in one summary. '
-            f'/{command} approver: someone whose DMs get each draft too; the first answer, his or theirs, decides. '
+            f'(work): the interval {AWAY_MINUTES} min, {AWAY_MINUTES * 2} with quota or context high; a direct post it '
+            'holds back is queued for its turn (status "queued" says when, kind="queued" once it went or failed); a '
+            'post without direct is held for casa (status "held"), or with an approver is their draft at once; '
+            'discord_cancel takes either back by its mark; dormindo (asleep): as trabalho, and what was held reaches '
+            f'him in one summary. /{command} approver: whose DMs get each draft too, the first answer deciding. '
         )
     return said + (
         'A message of anyone but the owner that the pre-harness rejects (invisible letters, a language other than '
@@ -1590,6 +1595,18 @@ SHAPES = {
             and a_text(item['text'])
         ),
     ),
+    'gone': (
+        '{"mark", "since", "how": one of GONE, "link": its post\'s or its draft\'s, or null, "channel"}',
+        lambda item: (
+            isinstance(item, dict)
+            and set(item) == {'mark', 'since', 'how', 'link', 'channel'}
+            and a_mark(item['mark'])
+            and stamp(item['since'])
+            and item['how'] in GONE
+            and (item['link'] is None or isinstance(item['link'], str))
+            and an_id(item['channel'])
+        ),
+    ),
     'held': (
         (
             '{"mark", "since", "mode": trabalho or dormindo, "channel", "reply_to": an id or null, "text", "files": '
@@ -1615,6 +1632,17 @@ SHAPES = {
 def a_mark(value):
     """whether a value is the mark of a post the bot keeps a turn or a place for: 32 hex letters"""
     return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{32}', value) is not None
+
+
+# how a queued or held post left its file (gone.json), as discord_cancel names it: posting and releasing while its post
+# or its draft is made, then what came of it
+GONE = ('posting', 'sent', 'not sent', 'releasing', 'draft', 'no draft', 'cancelled')
+
+
+def preview(text):
+    """a post's text as a summary or an answer shows it: its words on one line, the first PREVIEW letters"""
+    text = ' '.join(text.split())
+    return text if len(text) <= PREVIEW else text[: PREVIEW - 3] + '...'
 
 
 def a_text(value):
@@ -2222,6 +2250,7 @@ class Wimsy:
         self.approved = set()  # the messages the owner let through while the gateway heard: their ids, in memory only
         self.guard = threading.Lock()
         self.drafts = {}  # a lock a draft: one look at a time, so no draft is posted twice
+        self.push = None  # the server's push into its session, which the Server gives it
         self.made = set()  # the drafts this server made: the gateway's answers act on these alone, as every
         # session started in the workspace runs one and they share no lock
 
@@ -2692,6 +2721,7 @@ class Wimsy:
             'discord_emoji_upload': self.emoji_upload,
             'discord_allowed': self.allowed_list,
             'discord_freeze': self.freeze,
+            'discord_cancel': self.cancel,
         }
         return tools[name](args, cancelled, progress)
 
@@ -3224,6 +3254,7 @@ class Wimsy:
             if not held:
                 return [], approver, None
             self.store.save('held', [])
+            self.gone([(item, 'releasing', None) for item in held], now)
         quiet = mode == HOME and any(item['mode'] == 'dormindo' for item in held)
         done, stays = [], None
         for place, item in enumerate(held):
@@ -3242,8 +3273,19 @@ class Wimsy:
                 stays = f"the approver's DMs refused a copy, so {wait}: {copy}"
                 with self.store.locked():
                     self.store.save('held', held[place:] + self.store.load('held'))
+                    back = {item['mark'] for item in held[place:]}
+                    self.store.save('gone', [each for each in self.store.load('gone') if each['mark'] not in back])
                 break
             done.append((item, where, draft, copy, None))
+        dm = self.dm()
+        with self.store.locked():
+            self.gone(
+                [
+                    (item, 'draft' if draft else 'no draft', draft and link(None, dm, draft))
+                    for item, _, draft, _, _ in done
+                ],
+                now,
+            )
         made = sum(1 for each in done if each[2])
         log(f'held: {made} of {len(done)} held posts are drafts now' + (', with a summary' if quiet else ''))
         if quiet:
@@ -3261,8 +3303,7 @@ class Wimsy:
         dm = self.dm()
         lines = [f'While you were away, {len(done)} post{"s" if len(done) != 1 else ""} waited for your {YES}:']
         for place, (item, where, draft, _, error) in enumerate(done, 1):
-            text = ' '.join(item['text'].split())
-            text = text if len(text) <= PREVIEW else text[: PREVIEW - 3] + '...'
+            text = preview(item['text'])
             to = f'#{where.get("name") or item["channel"]}' if where else f'channel {item["channel"]}'
             if item['reply_to'] and where:
                 to += f' replying to {link(where.get("guild_id"), item["channel"], item["reply_to"])}'
@@ -3289,6 +3330,7 @@ class Wimsy:
                 return None
             self.store.save('queue', [each for each in queue if each['mark'] != item['mark']])
             self.store.save('direct', records + [[now, item['mark'], item['reply_to'], 'interval', None]])
+            self.gone([(item, 'posting', None)], now)
         channel, reply_to = item['channel'], item['reply_to']
         body = {'content': item['text'], 'allowed_mentions': {'parse': [], 'replied_user': False}}
         if reply_to:
@@ -3299,18 +3341,94 @@ class Wimsy:
         except (DiscordError, Refused) as error:
             with self.store.locked():  # its turn not taken: nothing went
                 self.store.save('direct', [each for each in self.store.load('direct') if each[1] != item['mark']])
+                self.gone([(item, 'not sent', None)], now)
             log(f'discord_post: a queued post did not go to channel {channel}: {error}')
             return item, None, str(error)
+        where_to = link(where.get('guild_id'), channel, posted)
         with self.store.locked():
             items = self.store.load('direct')
             self.store.save('direct', [each[:4] + [posted] if each[1] == item['mark'] else each for each in items])
-        where_to = link(where.get('guild_id'), channel, posted)
+            self.gone([(item, 'sent', where_to)], now)
         log(f'discord_post: queued, direct (interval), message {posted} in channel {channel}')
         try:
             self.keep_mentions(posted, item['text'], where_to)
         except Refused as error:
             return item, where_to, str(error)
         return item, where_to, None
+
+    def gone(self, items, now):
+        """under the state's lock: how each queued or held post left its file, written down for a day (HEARD_FOR), one
+        line a mark, so discord_cancel says why it cannot take one back: [(item, one of GONE, its link or None)]"""
+        marks = {item['mark'] for item, _, _ in items}
+        kept = [
+            each for each in self.store.load('gone') if each['since'] > now - HEARD_FOR and each['mark'] not in marks
+        ]
+        made = [
+            {'mark': item['mark'], 'since': now, 'how': how, 'link': where, 'channel': item['channel']}
+            for item, how, where in items
+        ]
+        self.store.save('gone', kept + made)
+
+    def cancel(self, args, cancelled, progress):
+        """a post discord_post queued for its turn or held for casa, taken back by its mark under the state's lock, so
+        no server posts it or makes it a draft after; what was taken told to the session too. Refused naming the mark
+        when it left already, and how, or when no post had it"""
+        take(args, 'discord_cancel', ('mark',), ())
+        mark = args['mark']
+        if not a_mark(mark):
+            raise Refused(f'mark is {shown(mark)}, not a mark discord_post gives (32 letters of 0-9 and a-f)')
+        with self.store.locked():
+            now = self.store.now()
+            queue, held = self.store.load('queue'), self.store.load('held')
+            item = next((each for each in queue if each['mark'] == mark), None)
+            was = 'queued' if item else 'held'
+            item = item or next((each for each in held if each['mark'] == mark), None)
+            if item is None:
+                raise Refused(self.not_taken(mark, now))
+            if was == 'queued':
+                self.store.save('queue', [each for each in queue if each['mark'] != mark])
+            else:
+                self.store.save('held', [each for each in held if each['mark'] != mark])
+            self.gone([(item, 'cancelled', None)], now)
+        log(f'discord_cancel: a {was} post for channel {item["channel"]} taken back')
+        got = {
+            'status': 'cancelled',
+            'mark': mark,
+            'was': was,
+            'channel': item['channel'],
+            'text': preview(item['text']),
+            'since': utc(item['since']),
+        }
+        if self.push:  # besides the answer, a notice as each change of the state is: nothing goes away unsaid
+            self.push(
+                f'The session took back the post {was} at {utc(item["since"])} for channel {item["channel"]} (mark '
+                f'{mark}): "{got["text"]}"; it goes nowhere now',
+                {'kind': 'notice', 'mark': mark, 'cancelled': was, 'channel': item['channel']},
+            )
+        return got
+
+    def not_taken(self, mark, now):
+        """why discord_cancel takes no post of a mark, under the state's lock: how it left its file, or that none of
+        the last day had it"""
+        found = next(
+            (each for each in self.store.load('gone') if each['mark'] == mark and each['since'] > now - HEARD_FOR), None
+        )
+        if found is None:
+            return (
+                f'mark {mark} is neither queued nor held, and no post of the last 24 h had it: it is not one '
+                'discord_post gave, or it left a day ago or more'
+            )
+        when = f'{hour_minute(found["since"])} UTC'
+        said = {
+            'posting': f'is being posted now, its turn come at {when}: it cannot be taken back',
+            'sent': f'went already, at {when}: {found["link"]}',
+            'not sent': f'left the queue at {when} without going, as Discord refused it (the session was told why)',
+            'releasing': f'is being made a draft now, since {when}: once it is, the {NO} on it drops it',
+            'draft': f'left the held posts at {when} as draft {found["link"]}: the {NO} on it drops it',
+            'no draft': f'left the held posts at {when} with no draft made (the session was told why and its text)',
+            'cancelled': f'was taken back already, at {when}',
+        }[found['how']]
+        return f'mark {mark} {said}'
 
     def post_status(self, args, cancelled, progress):
         take(args, 'discord_post_status', ('draft',), ('wait',))
@@ -5318,6 +5436,7 @@ TOOL_NAMES = (
     'discord_emoji_upload',
     'discord_allowed',
     'discord_freeze',
+    'discord_cancel',
 )
 
 
@@ -5651,8 +5770,31 @@ def tool_list(identity):
             'saying so'
         ),
     }
+    cancel = {
+        'name': 'discord_cancel',
+        'description': (
+            'Take back a post discord_post queued for its turn ("status": "queued") or held for casa ("status": '
+            '"held"), by the mark it returned, before it goes: under the state\'s lock, so no server posts it or makes '
+            'it a draft after. Returns JSON {"status": "cancelled", "mark", "was": "queued" or "held", "channel", '
+            f'"text" (its first {PREVIEW} letters), "since"}}, and a kind="notice" says the same. One that went '
+            'already (its link), is being posted or made a draft now, became a draft (whose cross drops it) or was '
+            'taken back before, and a mark no post of the last 24 h had, is an error saying which, naming the mark.'
+        ),
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'mark': {
+                    'type': 'string',
+                    'pattern': '^[0-9a-f]{32}$',
+                    'description': 'the mark discord_post returned with "queued" or "held"',
+                }
+            },
+            'required': ['mark'],
+            'additionalProperties': False,
+        },
+    }
     owned = [allowed, freeze] if identity.command else []
-    return tools + ([upload] if identity.drawn else []) + owned
+    return tools + ([upload] if identity.drawn else []) + owned + ([cancel] if identity.modes else [])
 
 
 def failure(rid, code, message, data=None):
@@ -5920,6 +6062,7 @@ class Server:
         self.relay = relay  # with no channel: the monitors' socket
         self.identity = tools.settings.identity
         self.title, self.listed = self.identity.title, tool_list(self.identity)
+        tools.push = self.push  # a tool's notice (discord_cancel's) goes as the gateway's do
         self.names = tuple(tool['name'] for tool in self.listed)  # the tools of its identity
         self.stopping = stopping or threading.Event()
         self.agreed = None  # the version an initialize agreed on
