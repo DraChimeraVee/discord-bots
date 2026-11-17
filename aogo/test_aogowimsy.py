@@ -4081,8 +4081,10 @@ class Direct(Statused):
             ),
             (
                 {'files': [str(text)]},
-                'files item 1 is a .txt: AogoWimsy posts images and sounds (png, jpg, jpeg, gif, '
-                'webp, ogg, opus, mp3, wav, flac, m4a)',
+                (
+                    'files item 1 is a .txt: AogoWimsy posts images and sounds (png, jpg, jpeg, gif, webp, ogg, opus, '
+                    'mp3, wav, flac, m4a)'
+                ),
             ),
             ({'wait': 0}, "wait is for the owner's answer to a draft, and a direct post waits for none: take it out"),
         )
