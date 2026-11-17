@@ -196,6 +196,10 @@ the tests run them too. Adding a rule is adding a block with its examples.
   and the session gets a `notice` naming who and the rule, never the text. Words that try to change the instructions,
   secrets named, destructive commands, pushes and merges, and claims of DraVee's word reach it with a `caution`; a
   question about DraVee himself (`owner-info`) too, and an answer to it is a draft only.
+- Edits: a message that reached the session and is edited comes again with its new text and `edited`, 5 edits of one
+  message at most (an embed's update, the same text, is none); a new text an inbound rule rejects is a `notice` too,
+  never the text. The last 500 messages that reached it are kept for that, in memory: an edit after a restart is not
+  told.
 - Out, on a direct post's text: Discord, GitHub, `sk-` and AWS keys, private key blocks, long secrets after `key=`,
   `token=` or `password=`, this machine's paths, private and loopback addresses, e-mail addresses, title IDs, the env
   file's lines, and the bot's own token: a hit is an error naming the rule, its line and letter, never the text, and
