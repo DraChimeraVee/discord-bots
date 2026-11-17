@@ -1395,6 +1395,16 @@ def multipart(body, files):
     return b''.join(parts), f'multipart/form-data; boundary={boundary}'
 
 
+def direct_body(text, reply_to, channel, files):
+    """a direct post's JSON: pinging no one, the reply's reference, and the files' places in the multipart form"""
+    body = {'content': text, 'allowed_mentions': {'parse': [], 'replied_user': False}}
+    if reply_to:
+        body['message_reference'] = {'message_id': reply_to, 'channel_id': channel, 'fail_if_not_exists': True}
+    if files:
+        body['attachments'] = [{'id': place, 'filename': name} for place, (name, _, _) in enumerate(files)]
+    return body
+
+
 def attached(value, title):
     """the files discord_post was given, read: [(name, bytes, type)]; None for none; Refused naming what is wrong"""
     if value is None:
@@ -1595,10 +1605,13 @@ SHAPES = {
         ),
     ),
     'queue': (
-        '{"mark", "since", "pid": the server that queued it, "channel", "reply_to": an id or null, "text"}',
+        (
+            '{"mark", "since", "pid": the server that queued it, "channel", "reply_to": an id or null, "text", "files": '
+            '[absolute path, ...], absent in what a server from before them queued}'
+        ),
         lambda item: (
             isinstance(item, dict)
-            and set(item) == {'mark', 'since', 'pid', 'channel', 'reply_to', 'text'}
+            and set(item) - {'files'} == {'mark', 'since', 'pid', 'channel', 'reply_to', 'text'}
             and a_mark(item['mark'])
             and stamp(item['since'])
             and isinstance(item['pid'], int)
@@ -1606,6 +1619,7 @@ SHAPES = {
             and an_id(item['channel'])
             and (item['reply_to'] is None or an_id(item['reply_to']))
             and a_text(item['text'])
+            and a_file_list(item.get('files', []))
         ),
     ),
     'gone': (
@@ -1634,12 +1648,19 @@ SHAPES = {
             and an_id(item['channel'])
             and (item['reply_to'] is None or an_id(item['reply_to']))
             and a_text(item['text'])
-            and isinstance(item['files'], list)
-            and len(item['files']) <= MOST_FILES
-            and all(isinstance(path, str) and os.path.isabs(path) for path in item['files'])
+            and a_file_list(item['files'])
         ),
     ),
 }
+
+
+def a_file_list(value):
+    """whether a value is a post's files as a queue or the held keep them: up to MOST_FILES absolute paths"""
+    return (
+        isinstance(value, list)
+        and len(value) <= MOST_FILES
+        and all(isinstance(path, str) and os.path.isabs(path) for path in value)
+    )
 
 
 def a_mark(value):
@@ -3088,8 +3109,6 @@ class Wimsy:
             instead = self.instead(mode)
         except (Refused, OSError) as error:
             mode, instead = None, f'and no draft is made either: {error}'
-        if args.get('files') is not None:
-            raise Refused(f'direct is true, and a direct post carries no files: {instead}')
         if args.get('wait') is not None:
             raise Refused("wait is for the owner's answer to a draft, and a direct post waits for none: take it out")
         if not identity.direct or not settings.direct:
@@ -3099,6 +3118,7 @@ class Wimsy:
             raise Refused(
                 f'the pre-harness keeps this text from going direct: {"; ".join(hit.said() for hit in hits)}: {instead}'
             )
+        files = attached(args.get('files'), self.title)  # read before a turn is taken: one that can't be takes none
         where = self.where(channel, reading=False)
         message = self.discord('GET', f'/channels/{channel}/messages/{reply_to}') if reply_to else None
         now, mark = self.store.now(), uuid.uuid4().hex
@@ -3111,7 +3131,7 @@ class Wimsy:
             if way.rule is None:
                 raise Refused(f'this text goes as a draft, not direct: {way.why}; {instead}')
             if way.rule == 'interval' and way.next > now and mode not in (HOME, None):
-                return self.enqueue(queued, mark, channel, reply_to, text, way, mode, now)
+                return self.enqueue(queued, mark, channel, reply_to, text, args.get('files') or [], way, mode, now)
             if way.rule == 'interval' and way.next > now and way.ahead:
                 many = f'{way.ahead} queued posts go' if way.ahead > 1 else '1 queued post goes'
                 raise Refused(
@@ -3128,11 +3148,9 @@ class Wimsy:
                     f'{hour_minute(way.next)} UTC ({utc(way.next)}); {instead}, or wait'
                 )
             self.store.save('direct', records + [[now, mark, reply_to, way.rule, None]])
-        body = {'content': text, 'allowed_mentions': {'parse': [], 'replied_user': False}}
-        if reply_to:
-            body['message_reference'] = {'message_id': reply_to, 'channel_id': channel, 'fail_if_not_exists': True}
+        body = direct_body(text, reply_to, channel, files)
         try:
-            posted = self.discord('POST', f'/channels/{channel}/messages', body)['id']
+            posted = self.discord('POST', f'/channels/{channel}/messages', body, files)['id']
         except DiscordError:
             with self.store.locked():  # its turn not taken: nothing went
                 self.store.save('direct', [item for item in self.store.load('direct') if item[1] != mark])
@@ -3150,7 +3168,7 @@ class Wimsy:
             got['left'] = way.left - 1
         return got
 
-    def enqueue(self, queued, mark, channel, reply_to, text, way, mode, now):
+    def enqueue(self, queued, mark, channel, reply_to, text, files, way, mode, now):
         """under the state's lock, away from home: a direct post the interval holds back, queued for its turn, which
         this server's look (drain) posts; its place, and when it goes at the soonest"""
         item = {
@@ -3160,6 +3178,7 @@ class Wimsy:
             'channel': channel,
             'reply_to': reply_to,
             'text': text,
+            'files': list(files),
         }
         self.store.save('queue', queued + [item])
         log(f'discord_post: queued for the interval (mode {mode}), {way.ahead} ahead, for channel {channel}')
@@ -3345,12 +3364,11 @@ class Wimsy:
             self.store.save('direct', records + [[now, item['mark'], item['reply_to'], 'interval', None]])
             self.gone([(item, 'posting', None)], now)
         channel, reply_to = item['channel'], item['reply_to']
-        body = {'content': item['text'], 'allowed_mentions': {'parse': [], 'replied_user': False}}
-        if reply_to:
-            body['message_reference'] = {'message_id': reply_to, 'channel_id': channel, 'fail_if_not_exists': True}
         try:
+            files = attached(item.get('files') or None, self.title)  # as they are now: one gone since is the error
+            body = direct_body(item['text'], reply_to, channel, files)
             where = self.where(channel, reading=False)  # today's list, not the one of the day it was queued
-            posted = self.discord('POST', f'/channels/{channel}/messages', body)['id']
+            posted = self.discord('POST', f'/channels/{channel}/messages', body, files)['id']
         except (DiscordError, Refused) as error:
             with self.store.locked():  # its turn not taken: nothing went
                 self.store.save('direct', [each for each in self.store.load('direct') if each[1] != item['mark']])
@@ -5042,6 +5060,8 @@ class Ear:
         else:
             meta['status'] = 'not sent'
             text = f'{queued} did not go to channel {item["channel"]}: {error}; its text, to post again: {item["text"]}'
+            if item.get('files'):
+                text += f'; its files: {", ".join(item["files"])}'
         self.push(text, meta)
         self.told('queued')
 
@@ -5485,7 +5505,7 @@ def direct_text(identity):
         + "; never to a stranger's message. The "
         'text passes the pre-harness first (tokens, keys, paths of this machine, private addresses, e-mails, title '
         'IDs, the env file). Anything else is an error naming the rule, and for the interval when the next goes: '
-        'send the draft yourself. No files. Returns JSON {"status": "sent", "direct": "owner", "trusted" or '
+        'send the draft yourself. Its files go with it, as a draft\'s, read when it goes. Returns JSON {"status": "sent", "direct": "owner", "trusted" or '
         '"interval", "link", "message", "channel", and "left" (replies left to that message) or "next" and '
         '"interval"}.'
     )

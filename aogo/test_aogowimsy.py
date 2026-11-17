@@ -3853,6 +3853,20 @@ class Direct(Statused):
         self.assertNotIn('reply 2', ' '.join(self.logs))
         self.assertFalse(self.bot.statusline.exists())  # the owner's replies need none
 
+    def test_images_go_with_a_direct_post(self):
+        shots = [Path(self.home) / 'before after.png', Path(self.home) / 'b.JPG']
+        shots[0].write_bytes(PNG)
+        shots[1].write_bytes(b'\xff\xd8\xff jpeg')
+        asked = self.fake.say(GENERAL, OWNER, 'how does it look?')
+        said = self.direct(text='like this', reply_to=asked, files=[str(path) for path in shots])
+        self.assertEqual(said, self.went('owner', left=2))
+        posted = self.fake.last(GENERAL)
+        names = [(a['filename'], a['content_type']) for a in posted['attachments']]
+        self.assertEqual(names, [('before after.png', 'image/png'), ('b.JPG', 'image/jpeg')])
+        self.assertEqual(self.fake.blobs[urllib.parse.urlsplit(posted['attachments'][0]['url']).path][0], PNG)
+        self.assertEqual(posted['content'], 'like this')
+        self.assertEqual(self.fake.messages[DM], [])  # no draft
+
     def test_a_trusted_persons_message_too_and_in_dms_the_owners_alone(self):
         theirs = self.fake.say(GENERAL, FRIEND, 'is it merged?')
         self.assertEqual(self.direct(reply_to=theirs), self.went('trusted', left=2))
@@ -4057,11 +4071,19 @@ class Direct(Statused):
         own = self.fake.say(GENERAL, OWNER, 'who is DraVee to you?')  # the owner's own question is his
         self.assertEqual(self.direct(reply_to=own)['direct'], 'owner')
 
-    def test_files_wait_a_wrong_value_and_aogowimsy_direct_0_are_refused_before_discord_hears_of_them(self):
-        png = Path(self.home) / 'a.png'
-        png.write_bytes(PNG)
+    def test_a_file_it_cannot_take_wait_a_wrong_value_and_direct_0_are_refused_before_discord_hears_of_them(self):
+        missing, text = Path(self.home) / 'gone.png', Path(self.home) / 'notes.txt'
+        text.write_text('notes')
         cases = (
-            ({'files': [str(png)]}, f'direct is true, and a direct post carries no files: {self.INSTEAD}'),
+            (
+                {'files': [str(missing)]},
+                f'files item 1 is {missing}, which cannot be read: No such file or directory',
+            ),
+            (
+                {'files': [str(text)]},
+                'files item 1 is a .txt: AogoWimsy posts images and sounds (png, jpg, jpeg, gif, '
+                'webp, ogg, opus, mp3, wav, flac, m4a)',
+            ),
             ({'wait': 0}, "wait is for the owner's answer to a draft, and a direct post waits for none: take it out"),
         )
         self.fake.requests.clear()
@@ -4371,6 +4393,49 @@ class Modes(Statused):
         self.assertTrue(all(item[4] for item in records))  # each with its post
         self.assertEqual(json.loads((self.state / 'queue.json').read_text()), {'queue': []})
         self.assertEqual(self.logs.count('channel: pushed a queued event'), 2)
+
+    def test_a_queued_direct_post_takes_its_images_at_its_turn_and_one_gone_by_then_is_named(self):
+        self.mode('trabalho')
+        self.status()
+        start = self.now
+        shot, late = Path(self.home) / 'shot.png', Path(self.home) / 'late.png'
+        shot.write_bytes(PNG)
+        late.write_bytes(PNG)
+        self.direct(text='first')
+        queued = self.direct(text='with a picture', files=[str(shot)])
+        dropped = self.direct(text='its picture goes away', files=[str(late)])
+        self.assertEqual((queued['status'], dropped['status']), ('queued', 'queued'))
+        items = json.loads((self.state / 'queue.json').read_text())['queue']
+        self.assertEqual([item['files'] for item in items], [[str(shot)], [str(late)]])
+        self.now += 600
+        self.status()
+        self.ear.tick()
+        posted = self.fake.last(GENERAL)
+        self.assertEqual(posted['content'], 'with a picture')
+        self.assertEqual([a['filename'] for a in posted['attachments']], ['shot.png'])
+        late.unlink()
+        self.now += 600
+        self.status()
+        self.ear.tick()
+        error = f'files item 1 is {late}, which cannot be read: No such file or directory'
+        meta = {'kind': 'queued', 'mark': dropped['mark'], 'channel': GENERAL, 'status': 'not sent'}
+        text = (
+            f'The post queued at {aw.hour_minute(start)} UTC did not go to channel {GENERAL}: {error}; its text, to '
+            f'post again: its picture goes away; its files: {late}'
+        )
+        self.assertEqual(self.queued()[-1], (text, meta))
+        self.assertEqual(self.fake.last(GENERAL)['content'], 'with a picture')  # nothing went in its place
+
+    def test_a_queue_from_before_files_still_drains(self):
+        self.mode('trabalho')
+        self.status()
+        mark = 'ab' * 16
+        old = {'mark': mark, 'since': self.now, 'pid': 1 << 30, 'channel': GENERAL, 'reply_to': None, 'text': 'old'}
+        (self.state / 'queue.json').write_text(json.dumps({'queue': [old]}))
+        self.ear.tick()
+        posted = self.fake.last(GENERAL)
+        self.assertEqual((posted['content'], posted['attachments']), ('old', []))
+        self.assertEqual(json.loads((self.state / 'queue.json').read_text()), {'queue': []})
 
     def test_a_queued_post_discord_refuses_gives_its_turn_and_its_text_back_and_at_home_it_goes_before_new_ones(self):
         self.mode('trabalho')

@@ -178,7 +178,7 @@ posts are refused, naming the file and why. Doubled for the quota (seven days or
 more, the context at 80% or more, and 3 or more of this session's subagent transcripts written in the last 15 minutes,
 each; halved when none of those holds and the week's quota used is under the share of the week gone; held within 10
 minutes and 2 hours; at 95% quota no interval post goes direct (the owner's and the trusted replies still do). A direct
-post carries no files and pings no one. Away from home (below) the interval is another.
+post pings no one; its images and sounds go with it, read when it goes (a queued one's at its turn). Away from home (below) the interval is another.
 
 The pre-harness is `aogo/preharness.json`: rules, each with its direction (`in`, a message on its way to the session;
 `out`, a direct post's text), what it matches (a regex or a list of them, letters by code point with the emoji joiners
