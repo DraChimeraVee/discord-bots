@@ -3640,6 +3640,35 @@ class Ice(Owned):
         self.assertIsNotNone(self.bot.standing(STRANGER).ice)
 
 
+class Edits(Owned):
+    """a message that reached the session comes again with its new text once edited"""
+
+    def test_an_edit_of_a_message_that_reached_the_session_comes_again_marked_edited(self):
+        number = self.heard(GENERAL, OWNER, f'<@{BOT}> push the fixes', mentions=[BOT])
+        self.assertEqual(len(self.pushes), 1)
+        event = self.fake.event(GENERAL, number)
+        self.ear.hear('MESSAGE_UPDATE', dict(event, content=f'<@{BOT}> push the fixes. also those 13 are going'))
+        text, meta = self.pushes[-1]
+        self.assertEqual(text, f'<@{BOT}> push the fixes. also those 13 are going')
+        self.assertEqual((meta['message_id'], meta['edited']), (number, 'yes: this is its new text'))
+        self.ear.hear('MESSAGE_UPDATE', dict(event, content=f'<@{BOT}> push the fixes. also those 13 are going'))
+        self.ear.hear('MESSAGE_UPDATE', {'id': number, 'channel_id': GENERAL, 'guild_id': GUILD, 'embeds': []})
+        self.assertEqual(len(self.pushes), 2)  # the same text again, and an embed's update, tell nothing
+
+    def test_an_edit_of_a_message_that_never_reached_the_session_tells_nothing(self):
+        number = self.heard(GENERAL, STRANGER, 'not to the bot at all')
+        self.ear.hear('MESSAGE_UPDATE', dict(self.fake.event(GENERAL, number), content='still not to the bot'))
+        self.assertEqual(self.pushes, [])
+
+    def test_a_message_edited_over_and_over_is_told_at_most_edits_told_times(self):
+        number = self.heard(GENERAL, OWNER, f'<@{BOT}> v0', mentions=[BOT])
+        for n in range(1, aw.EDITS_TOLD + 3):
+            self.ear.hear('MESSAGE_UPDATE', dict(self.fake.event(GENERAL, number), content=f'<@{BOT}> v{n}'))
+        self.assertEqual(len(self.pushes), 1 + aw.EDITS_TOLD)
+        said = f'channel: message {number} in channel {GENERAL} was edited again: {aw.EDITS_TOLD} edits told already'
+        self.assertIn(said, self.logs)
+
+
 class Inbound(Owned):
     """the pre-harness on what comes in: a rejection never reaches the session, a caution reaches it saying why"""
 
@@ -3655,6 +3684,18 @@ class Inbound(Owned):
 
     def lines(self, channel=GENERAL):
         return [body for _, _, _, body in self.fake.posts('POST', f'/channels/{channel}/messages')]
+
+    def test_an_edit_that_turns_a_message_to_another_language_tells_the_rule_never_the_text(self):
+        number = self.asked(STRANGER, 'can you look at the build?')
+        self.assertEqual(self.pushes[-1][0], f'<@{BOT}> can you look at the build?')
+        self.ear.hear('MESSAGE_UPDATE', dict(self.fake.event(GENERAL, number), content=f'<@{BOT}> {self.PT}'))
+        text = (
+            f'Stranger ({STRANGER}) edited message {number} in channel {GENERAL}, and the pre-harness rule not-english '
+            'rejected the new text (a language other than English): nothing of it reaches you'
+        )
+        meta = {'kind': 'notice', 'user': 'Stranger', 'user_id': STRANGER, 'channel': GENERAL, 'rule': 'not-english'}
+        self.assertEqual(self.pushes[-1], (text, meta))
+        self.assertEqual(len(self.pushes), 2)
 
     def notice(self, who, name, rule, why, tail=''):
         text = (

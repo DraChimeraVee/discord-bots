@@ -358,6 +358,8 @@ MENTION_WEIGHT = 'normal'  # the weight of their replies, an allowed person's
 MENTION = re.compile(r'<@!?([0-9]{17,20})>')  # a person's mention in a text; <@&id> is a role's
 OWNED = "'s"  # what heard_words adds for whose message
 HEARD_FOR = 24 * 3600  # seconds what became of a message is kept: the counts of the day
+REACHED_KEPT = 500  # the messages that reached the session kept for their edits, the newest
+EDITS_TOLD = 5  # the edits of one message told to the session, at most
 TICK = 15.0  # seconds between two looks at the people's state for what ran out
 ICE_FIRST, ICE_AGAIN = 2 * 3600, 24 * 3600  # seconds an ice lasts; again: iced in the last STRIKES_FOR
 STRIKES_FOR = 7 * 24 * 3600  # seconds a strike counts
@@ -4933,6 +4935,7 @@ class Ear:
         self.started = tools.store.now() if tools.store else 0.0  # what ran out before it is not told
         self.trouble = None  # the last failure of a look at the people's state, said once
         self.troubles = {}  # the last failure of each look at the mode's state (MODE_LOOKS), said once
+        self.reached = {}  # a message that reached the session: (its kind, the message as told, its edits told)
 
     def feed(self, kind, data):
         """from the gateway's thread: never waits on Discord's REST there. A use of the command is answered in a
@@ -5180,6 +5183,8 @@ class Ear:
         elif kind == 'MESSAGE_CREATE':
             self.hub.deliver(data)
             self.message(data)
+        elif kind == 'MESSAGE_UPDATE':
+            self.edited(data)
         elif kind == 'MESSAGE_REACTION_ADD':
             self.reaction(data)
 
@@ -5232,6 +5237,35 @@ class Ear:
                 else:
                     quoted = self.tools.discord('GET', f'/channels/{channel}/messages/{number}')
             self.tell(message, 'message', quoted)
+
+    def edited(self, data):
+        """a message that reached the session, edited since: told again with its new text and edited set, where the
+        text changed (an embed's resolving updates a message too) and EDITS_TOLD times at most; a new text the
+        pre-harness rejects for its author tells the rule, never the text"""
+        number, text = data.get('id'), data.get('content')
+        got = self.reached.get(number)
+        if got is None or text is None or text == (got[1].get('content') or ''):
+            return
+        kind, before, edits = got
+        channel = before['channel_id']
+        if edits >= EDITS_TOLD:
+            log(f'channel: message {number} in channel {channel} was edited again: {EDITS_TOLD} edits told already')
+            return
+        message = before | {key: value for key, value in data.items() if value is not None}
+        self.reached[number] = (kind, message, edits + 1)
+        hit = self.tools.rejects(message)
+        if hit:
+            author = message['author']['id']
+            name = message['author'].get('global_name') or message['author'].get('username') or author
+            said = (
+                f'{name} ({author}) edited message {number} in channel {channel}, and the pre-harness rule '
+                f'{hit.rule.id} rejected the new text ({hit.rule.why}): nothing of it reaches you'
+            )
+            meta = {'kind': 'notice', 'user': name, 'user_id': author, 'channel': channel, 'rule': hit.rule.id}
+            self.push(said, meta)
+            self.told('notice')
+            return
+        self.tell(message, kind, edited=True)
 
     def admit(self, message, kind, level):
         """a message of a trusted or allowed person, one the owner let through, or a mentioned person's reply, told
@@ -5417,9 +5451,14 @@ class Ear:
             self.push(f'{who} refused draft {draft}: not posted to channel {got["channel"]}{tail}', meta)
         log(f'channel: draft {got["status"]}')
 
-    def tell(self, message, kind, quoted=None):
-        """a message pushed whole; with quoted, the message the owner replied to, whole too"""
+    def tell(self, message, kind, quoted=None, edited=False):
+        """a message pushed whole; with quoted, the message the owner replied to, whole too; edited: its new text,
+        after an edit (edited), and otherwise kept for its edits"""
         seen = view(message)
+        if not edited:
+            self.reached[seen['id']] = (kind, message, 0)
+            while len(self.reached) > REACHED_KEPT:
+                self.reached.pop(next(iter(self.reached)))
         meta = {
             'kind': kind,
             'author': seen['author'] or '',
@@ -5429,6 +5468,8 @@ class Ear:
         }
         if seen['reply_to']:
             meta['reply_to'] = seen['reply_to']
+        if edited:
+            meta['edited'] = 'yes: this is its new text'
         if seen['attachments']:
             meta['attachments'] = '; '.join(safe_name(name) for name in seen['attachments'])
         text = seen['text'] or ('(no text: attachments only)' if seen['attachments'] else '(no text)')
