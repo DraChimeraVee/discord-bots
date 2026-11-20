@@ -42,7 +42,9 @@ Discord's gateway, and pushes into the session, as notifications/claude/channel,
 (a mention, or a reply to one of its messages) from the owner, a trusted or allowed person, their DMs with it, a
 stranger's
 addressed message the owner let through with his WIMSY reaction, and only the name of a stranger who wrote in DMs.
-The owner's reply that mentions AogoWimsy lets the message he replied to through too, and carries it whole.
+The owner's reply that mentions AogoWimsy lets the message he replied to through too, and carries it whole; so does a
+trusted person's that reaches the session, saying who let it through, unless the pre-harness rejects that message or
+its author is iced or muted (Wimsy.kept_out), and a direct answer to their reply is held by that message's rules too.
 XujiWimsy's client, Grok Build, takes no push from an MCP server: what wakes its session is a monitor, a command it
 runs whose every printed line comes in as a turn. So XujiWimsy pushes the same events, a line each (event_line), to
 the monitors on its Unix socket (Relay), which xujiwimsy.py --listen connects to from the session's monitor; its
@@ -241,8 +243,8 @@ class Identity(NamedTuple):
 # this line alone, as a reply, pinging the owner and no one else. Each limit an env file key may set (GREET_LIMITS);
 # past one the call is only counted, as any other stranger's message.
 GREETING = (
-    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets "
-    'through. <@{owner}>'
+    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee, or "
+    'someone he trusts, lets through. <@{owner}>'
 )
 GREET_HOURS = 24  # hours before one person is greeted again
 GREET_PER_HOUR = 10  # greetings in an hour at most, everyone's together; 0 greets no one
@@ -266,14 +268,15 @@ GREET_LIMITS = {  # each limit's key (after the prefix): its default and the who
 # pra algumas pessoas"; slash commands, help for anyone, allow his alone, 24 hours when he names no time). Discord
 # sets who sees a command for the whole of it, never a subcommand: /aogo shows to every member, and allow, deny and
 # allowed answer anyone but the owner that they are his. help answers a stranger within the greeting's limits.
-HELP_ASK = 'To ask me something, mention <@{me}> with what you need; DraVee lets it through.'
+HELP_ASK = 'To ask me something, mention <@{me}> with what you need; DraVee, or someone he trusts, lets it through.'
 HELP_WHO = "I'm {who}, <@{owner}>'s AI agent here: every post of mine waits for their approval."  # no greeting's bot
 HELP_OWNER = (
     'Yours alone:\n'
     '/{command} allow user [time]: their messages to me reach the session; time 2h, 1d, 7d or perm, 1d without one\n'
     '/{command} deny user: takes their allow back\n'
     '/{command} allowed: who is allowed, and until when\n'
-    '/{command} trust user: they reach the session as one you trust, 30 messages an hour\n'
+    '/{command} trust user: they reach the session as one you trust, 30 messages an hour, and their reply mentioning '
+    'me lets the message it answers through\n'
     '/{command} untrust user: takes their trust back\n'
     '/{command} weight user level [time]: mute 0, low 3, normal 10 or high 30 of their messages an hour reach the '
     "session, 1d without a time; then their level's again\n"
@@ -1118,13 +1121,13 @@ def instructions(settings):
         + (
             # kept short: Grok Build shows its model the first GROK_SHOWS bytes of these
             f"Of what it reads, only the owner's messages, its own and those of whom he trusts or allowed with "
-            f"/{command} reach you; another's only when the owner let it through (his :{wimsy}: on it, or his reply "
-            f'mentioning {me}). '
+            f"/{command} reach you; another's when his :{wimsy}: is on it, or his or a trusted person's reply to it "
+            f'mentions {me}. '
             if command and not settings.identity.claude
             else f"Of what it reads, only the owner's messages, those of {users}{allowed} and its own reach you; the "
-            f'others are counted, but for a message the owner let through: one addressed to {me} (a mention, or a '
-            f'reply to one of its messages) that he put his :{wimsy}: reaction on, or any he replied to while '
-            f'mentioning {me}. '
+            f'others are counted, but for one let through: addressed to {me} (a mention, or a reply to one of its '
+            f"messages) with the owner's :{wimsy}: reaction, or any he or "
+            f'{"a trusted person" if command else "a listed user"} replied to mentioning {me}. '
         )
         # the greeting after the command: Claude Code (2.1.318) shows its model the first 4094 letters of these, and
         # the session is told nothing of a greeting
@@ -1136,9 +1139,10 @@ def instructions(settings):
         return said + (
             'While the session runs, Discord comes in as <channel> events: kind="message" (from the owner, '
             f'{"a trusted person or one he allowed" if command else "a listed user"}: a message addressed to {me}, or '
-            'their DM; when the owner replied to someone while mentioning '
-            f'{me}, the text ends with the message he replied to, and quoted_author and quoted_author_id name its '
-            'author), kind="approved" (a stranger\'s addressed message the owner let through with the reaction), '
+            f'their DM; when the owner or {"a trusted person" if command else "a listed user"} replied to someone '
+            f'while mentioning {me}, the text ends with the message replied to, quoted_author and quoted_author_id '
+            'name its author, and let_through_by who let a stranger\'s through), kind="approved" (a stranger\'s '
+            'addressed message the owner let through with the reaction), '
             + (
                 f'kind="mentioned" (the reply of someone a post of {me}\'s mentioned, to that post and within '
                 f'{MENTION_HOURS} h of it: {WEIGHTS[MENTION_WEIGHT]} an hour reach you, and your answer is a draft '
@@ -1842,11 +1846,11 @@ def link(guild, channel, message):
     return f'https://discord.com/channels/{guild or "@me"}/{channel}/{message}'
 
 
-def view(message, approved=False):
-    """a message as the session gets it"""
+def view(message, approved=False, by=None):
+    """a message as the session gets it; by: who let it through (who_let), with approved"""
     author = message['author']
     reference = message.get('message_reference') or {}
-    return {
+    seen = {
         'id': message['id'],
         'author': author.get('global_name') or author.get('username'),
         'author_id': author['id'],
@@ -1856,6 +1860,15 @@ def view(message, approved=False):
         'attachments': [item.get('filename') for item in message.get('attachments', [])],
         'approved': approved,
     }
+    return seen | ({'let_through_by': by} if approved and by else {})
+
+
+def who_let(author=None):
+    """who let a stranger's message through, as the session is told: the owner (author None), or a trusted person's
+    reply (author: theirs, as Discord gives it), so the session knows it was not his"""
+    if author is None:
+        return 'the owner'
+    return f'{author.get("global_name") or author.get("username") or author["id"]} ({author["id"]}), trusted'
 
 
 def mentions_me(message, me, roles):
@@ -1884,12 +1897,21 @@ def addressed(message, me, roles):
     return message.get('type') == REPLY and (answered.get('author') or {}).get('id') == me
 
 
-def quoting(message, owner, me, roles):
-    """the id of the message the owner replied to while mentioning the bot, which lets it through as his WIMSY
-    does (DraVee, 2026-10-21: "e literalmente eu quotando outra pessoa"); None for any other message"""
-    if message['author']['id'] != owner or message.get('type') != REPLY or not mentions_me(message, me, roles):
+def quoting(message, me, roles):
+    """the id of the message a reply that mentions the bot answers, whoever wrote it: the owner's lets it through as
+    his WIMSY does (DraVee, 2026-10-21: "e literalmente eu quotando outra pessoa"), and so does a trusted person's
+    (Wimsy.lets_through); None for any other message"""
+    if message.get('type') != REPLY or not mentions_me(message, me, roles):
         return None
     return (message.get('message_reference') or {}).get('message_id')
+
+
+def replied_to(tools, message, number):
+    """the message a reply answers: the one its event or Discord's answer carries, None when it was deleted, or read
+    from Discord when Discord did not look it up"""
+    if 'referenced_message' in message:
+        return message['referenced_message']
+    return tools.discord('GET', f'/channels/{message["channel_id"]}/messages/{number}')
 
 
 def footer(kind, channel, reply_to, twin=None):
@@ -2290,6 +2312,8 @@ class Wimsy:
         self.told = set()  # the changes of the people's state this server told its session of, with no event of their
         # own: (what, person, when)
         self.approved = set()  # the messages the owner let through while the gateway heard: their ids, in memory only
+        self.vouched = {}  # those a trusted person's reply let through while it heard: id: their author, as Discord
+        # gives it; in memory only
         self.guard = threading.Lock()
         self.drafts = {}  # a lock a draft: one look at a time, so no draft is posted twice
         self.push = None  # the server's push into its session, which the Server gives it
@@ -2640,6 +2664,52 @@ class Wimsy:
         standing = self.standing(message['author']['id'], now)
         return not standing.ice and not self.mute_set(standing, now)
 
+    def lets_through(self, message, me, roles):
+        """the id of the message a reply lets through, mentioning the bot: the owner's, or that of someone he trusts
+        whose messages reach the session (not muted) and that the pre-harness takes (DraVee, 2026-11-20: "also we
+        need to fix when trusted people reply and mention you like fuddles did"); None for any other"""
+        number = quoting(message, me, roles)
+        author = message['author']['id']
+        if number is None or author == self.settings.owner:
+            return number
+        standing = self.standing(author)
+        if standing.level != 'trusted' or standing.weight == 'mute' or self.rejects(message):
+            return None
+        return number
+
+    def kept_out(self, message, by):
+        """why a message a trusted person's reply let through (by: their id) still does not reach the session, or
+        None: the pre-harness rejects it, or its author is iced or muted. The owner's (by: his id) passes these, as
+        today: his reaction passes an ice, and his reply a rejection too, which only adds caution"""
+        if by == self.settings.owner:
+            return None
+        hit = self.rejects(message)
+        if hit:
+            return f'the pre-harness rejects it, {hit.said()}'
+        author = message['author']['id']
+        if author in (self.settings.owner, self.known.get('me')) or self.store is None:
+            return None
+        now = self.store.now()
+        standing = self.standing(author, now)
+        if standing.ice:
+            return f'its author is iced until {utc(standing.ice["until"])} ({standing.ice["kind"]})'
+        if self.mute_set(standing, now):
+            return 'its author weighs mute: none of their messages reach the session'
+        return None
+
+    def carried_by(self, message):
+        """the message a trusted person's reply that mentions the bot carries to the session, whose inbound rules hold
+        a direct answer to that reply as its own would (so a stranger's text reaches no one through it unchecked);
+        None for any other message, and for one that carries the owner's or the bot's own"""
+        author = message['author']['id']
+        if author == self.settings.owner or message.get('type') != REPLY or self.standing(author).level != 'trusted':
+            return None
+        number = quoting(message, self.me(), self.roles())
+        quoted = replied_to(self, message, number) if number else None
+        if quoted is None or quoted['author']['id'] in (self.settings.owner, self.me()):
+            return None
+        return quoted
+
     def intake(self, message, kind):
         """what becomes of a message of a trusted or allowed person (kind message), one the owner let through
         (approved) or a mentioned person's reply (mentioned), decided once under the state's lock whichever server of
@@ -2987,6 +3057,14 @@ class Wimsy:
             held = next((hit for hit in hits if hit.rule.action in ('draft', 'reject')), None)
             if held:
                 return draft(f'message {message["id"]} carries {held.rule.id} ({held.rule.why})')
+            carried = self.carried_by(message)
+            hits = caught(self.rules, 'in', carried.get('content') or '') if carried else []
+            held = next((hit for hit in hits if hit.rule.action in ('draft', 'reject')), None)
+            if held:
+                return draft(
+                    f'message {message["id"]} lets through message {carried["id"]}, which carries {held.rule.id} '
+                    f'({held.rule.why})'
+                )
             standing = self.standing(author, now)
             if standing.level in ('owner', 'trusted'):
                 rule = standing.level
@@ -2999,7 +3077,8 @@ class Wimsy:
                         f"the owner's to check: his {YES} is the permission"
                     )
                 return draft(
-                    f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+                    f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the "
+                    'permission'
                 )
         if rule != 'interval':
             left = REPLIES - sum(1 for item in records if item[2] == message['id'])
@@ -3669,25 +3748,45 @@ class Wimsy:
         query = {'limit': limit} | ({'after': after} if after else {})
         page = sorted(self.discord('GET', f'/channels/{channel}/messages', **query), key=lambda m: int(m['id']))
         me = self.me()
-        roles = self.roles()
-        quoted = self.approved | {quoting(m, self.settings.owner, me, roles) for m in page}
+        owned, vouched = self.let_by_replies(page, me, self.roles())
         now = self.store.now() if self.store else None
         pace = self.pace(now) if self.store else None  # read once for the page
         kept, heard = [], {}
         for message in page:
-            author = message['author']['id']
+            author, number = message['author']['id'], message['id']
             if author not in heard:
                 heard[author] = author in named if named is not None else author == me or self.person(author)
             if self.rejects(message):
                 continue
             if heard[author]:
                 kept.append(view(message) | self.about(message, 'message', now, pace, where))
-            elif named is None and author != me and (message['id'] in quoted or self.let_through(channel, message, me)):
-                kept.append(view(message, approved=True) | self.about(message, 'approved', now, pace, where))
+            elif named is None and author != me and (number in owned or self.let_through(channel, message, me)):
+                kept.append(view(message, True, who_let()) | self.about(message, 'approved', now, pace, where))
+            elif (
+                named is None
+                and author != me
+                and number in vouched
+                and not self.kept_out(message, vouched[number]['id'])
+            ):
+                by = who_let(vouched[number])
+                kept.append(view(message, True, by) | self.about(message, 'approved', now, pace, where))
             elif named is None and author != me and self.invited(message, now):
                 kept.append(view(message) | self.about(message, 'mentioned', now, pace, where))
         newest = page[-1]['id'] if page else after
         return {'channel': channel, 'messages': kept, 'left_out': len(page) - len(kept), 'after': newest}
+
+    def let_by_replies(self, page, me, roles):
+        """who let messages through by a reply mentioning the bot, from what the gateway heard and the replies among
+        page: (the ids the owner let through, {an id a trusted person's reply let through: its author, as Discord
+        gives it}); the owner's WIMSY reaction is let_through's to read"""
+        owned, vouched = set(self.approved), dict(self.vouched)
+        for message in page:
+            number = self.lets_through(message, me, roles)
+            if number is not None and message['author']['id'] == self.settings.owner:
+                owned.add(number)
+            elif number is not None:
+                vouched.setdefault(number, message['author'])
+        return owned, vouched
 
     def since(self, channel, after):
         """every message of a channel after an id, from Discord's REST, oldest first"""
@@ -3704,33 +3803,36 @@ class Wimsy:
 
     def readable(self, channel, message):
         """Refused unless discord_read gives the message: the owner's, a listed user's, the bot's own, one the owner
-        let through (his WIMSY reaction, or his reply mentioning the bot among the PAGE messages after it), or a
-        mentioned person's reply to the post that mentioned them; the refusal names no one"""
+        let through (his WIMSY reaction, or his reply mentioning the bot among the PAGE messages after it), one a
+        trusted person's such reply let through and kept_out keeps out for nothing, or a mentioned person's reply to
+        the post that mentioned them; the refusal names no one"""
         wimsy = self.settings.identity.wimsy  # the owner's emoji that lets a stranger's message through to this bot
-        me = self.me()
+        me, number = self.me(), message['id']
         hit = self.rejects(message)
         if hit:
-            raise Refused(
-                f'message {message["id"]} is not one {self.title} gives: the pre-harness rejects it, {hit.said()}'
-            )
+            raise Refused(f'message {number} is not one {self.title} gives: the pre-harness rejects it, {hit.said()}')
         if message['author']['id'] == me or self.person(message['author']['id']):
             return
-        if message['id'] in self.approved or self.let_through(channel, message, me) or self.invited(message):
+        if number in self.approved or self.let_through(channel, message, me) or self.invited(message):
             return
-        later = self.discord('GET', f'/channels/{channel}/messages', after=message['id'], limit=PAGE)
-        roles = self.roles()
-        if message['id'] in {quoting(m, self.settings.owner, me, roles) for m in later}:
+        if number in self.vouched and not self.kept_out(message, self.vouched[number]['id']):
             return
-        if self.muted(message['author']['id']):
+        later = self.discord('GET', f'/channels/{channel}/messages', after=number, limit=PAGE)
+        owned, vouched = self.let_by_replies(later, me, self.roles())
+        why = self.kept_out(message, vouched[number]['id']) if number in vouched else None
+        if number in owned or number in vouched and not why:
+            return
+        muted = self.muted(message['author']['id'])
+        if muted:
+            raise Refused(f'message {number} is not one {self.title} gives: its author {muted}')
+        if why:
             raise Refused(
-                f'message {message["id"]} is not one {self.title} gives: its author '
-                f'{self.muted(message["author"]["id"])}'
+                f"message {number} is not one {self.title} gives: a trusted user's reply let it through, but {why}"
             )
         raise Refused(
-            f"message {message['id']} is not one {self.title} gives: neither the owner's ({self.settings.owner}), "
-            f'{self.heard_words(OWNED)} nor its own, and the owner has not let it through (his :{wimsy}: reaction, or '
-            'his '
-            f'reply to it mentioning {self.title})'
+            f"message {number} is not one {self.title} gives: neither the owner's ({self.settings.owner}), "
+            f'{self.heard_words(OWNED)} nor its own, and neither the owner nor a trusted user let it through (his '
+            f':{wimsy}: reaction, or a reply of theirs to it mentioning {self.title})'
         )
 
     def attachments(self, args, cancelled, progress):
@@ -4919,7 +5021,8 @@ class Ear:
     """what the gateway hears, sorted: every message goes to the waits on its channel; the session gets, pushed as a
     channel event, each message addressed to the bot from the owner or a listed user, their DMs, a stranger's
     addressed message the owner let through with his WIMSY reaction, and only the name of a stranger who wrote in
-    DMs; the owner's reply that mentions the bot carries the message he replied to, and lets it through. A stranger
+    DMs; the owner's reply that mentions the bot, or a trusted person's (carried), carries the message it answers,
+    and lets it through. A stranger
     who calls the bot in a channel gets the identity's greeting, within its limits, and the session hears nothing of
     it. Someone the owner allowed with his command is heard as a listed user until the allow runs out. The command is
     registered in each server the bot joins, and each use of it answered; an allow or a deny is told to the session.
@@ -5227,16 +5330,28 @@ class Ear:
             if self.tools.settings.identity.greeting and self.calls(message):
                 self.greet(message)
         elif level != 'owner':
-            self.admit(message, 'message', level)
+            self.admit(message, 'message', level, carry=True)
         else:
-            quoted, number = None, quoting(message, self.tools.settings.owner, me, roles)
-            if number:
-                self.tools.approved.add(number)
-                if 'referenced_message' in message:
-                    quoted = message['referenced_message']  # None: it was deleted
-                else:
-                    quoted = self.tools.discord('GET', f'/channels/{channel}/messages/{number}')
-            self.tell(message, 'message', quoted)
+            self.tell(message, 'message', **self.carried(message))
+
+    def carried(self, message):
+        """what a reply mentioning the bot carries, as tell takes it: the message it answers, whole, when its author is
+        the owner or someone he trusts (Wimsy.lets_through), kept as let through by them (Wimsy.approved,
+        Wimsy.vouched) and said who; for a trusted person's, that message and why it does not reach the session instead
+        when Wimsy.kept_out says so. {} for any other message"""
+        tools, author = self.tools, message['author']
+        number = tools.lets_through(message, tools.me(), tools.roles())
+        if number is None:
+            return {}
+        quoted = replied_to(tools, message, number)  # None: it was deleted
+        if author['id'] == tools.settings.owner:
+            tools.approved.add(number)
+            return {'quoted': quoted, 'by': who_let()}
+        why = tools.kept_out(quoted, author['id']) if quoted else None
+        if why:
+            return {'kept': (quoted, why)}
+        tools.vouched[number] = author
+        return {'quoted': quoted, 'by': who_let(author)}
 
     def edited(self, data):
         """a message that reached the session, edited since: told again with its new text and edited set, where the
@@ -5267,12 +5382,13 @@ class Ear:
             return
         self.tell(message, kind, edited=True)
 
-    def admit(self, message, kind, level):
+    def admit(self, message, kind, level, carry=False):
         """a message of a trusted or allowed person, one the owner let through, or a mentioned person's reply, told
         to the session when its weight lets it reach the session, else only counted; a state file it cannot read stops
-        it, said"""
+        it, said. carry: in a channel, a trusted person's reply that reaches the session carries the message it
+        answers, as the owner's does (carried); nothing is let through by one that does not reach it"""
         if self.tools.store is None:  # a bot with no command weighs no one
-            self.tell(message, kind)
+            self.tell(message, kind, **(self.carried(message) if carry else {}))
             return
         channel = message['channel_id']
         try:
@@ -5286,7 +5402,7 @@ class Ear:
             )
             return
         if got.outcome == 'reached':
-            self.tell(message, kind)
+            self.tell(message, kind, **(self.carried(message) if carry else {}))
         elif got.outcome.startswith('rejected: '):
             self.rejected(message, got)
         else:
@@ -5451,9 +5567,11 @@ class Ear:
             self.push(f'{who} refused draft {draft}: not posted to channel {got["channel"]}{tail}', meta)
         log(f'channel: draft {got["status"]}')
 
-    def tell(self, message, kind, quoted=None, edited=False):
-        """a message pushed whole; with quoted, the message the owner replied to, whole too; edited: its new text,
-        after an edit (edited), and otherwise kept for its edits"""
+    def tell(self, message, kind, quoted=None, edited=False, by=None, kept=None):
+        """a message pushed whole; with quoted, the message the owner or a trusted person replied to, whole too, and
+        by: who let it through (who_let), said for a stranger's (let_through_by), and in its text when it was not the
+        owner; kept: (the message a trusted person replied to, why it does not reach the session), named with the why
+        and never its text; edited: its new text, after an edit (edited), and otherwise kept for its edits"""
         seen = view(message)
         if not edited:
             self.reached[seen['id']] = (kind, message, 0)
@@ -5478,8 +5596,18 @@ class Ear:
             meta.update(quoted_author=them['author'] or '', quoted_author_id=them['author_id'])
             if them['attachments']:
                 meta['quoted_attachments'] = '; '.join(safe_name(name) for name in them['attachments'])
+            stranger = (
+                them['author_id'] != self.tools.me() and self.tools.standing(them['author_id']).level == 'stranger'
+            )
+            if by and stranger:
+                meta['let_through_by'] = by
+            through = f', let through by {by}' if by and stranger and by != who_let() else ''
             said = them['text'] or ('(no text: attachments only)' if them['attachments'] else '(no text)')
-            text += f'\n\nReplying to {them["author"]} ({them["author_id"]}), message {them["id"]}:\n{said}'
+            text += f'\n\nReplying to {them["author"]} ({them["author_id"]}), message {them["id"]}{through}:\n{said}'
+        if kept:
+            them, why = view(kept[0]), kept[1]
+            text += f'\n\nReplying to {them["author"]} ({them["author_id"]}), message {them["id"]}, which does not '
+            text += f'reach you: {why}'
         meta.update(self.tools.about(message, kind))
         said = (message.get('content') or '') + ('\n' + (quoted.get('content') or '') if quoted else '')
         owner = seen['author_id'] == self.tools.settings.owner  # his rules only add caution
@@ -5505,8 +5633,9 @@ FROM = {
 }
 MESSAGE = (
     '{"id", "author" (their name), "author_id", "time" (ISO 8601), "text", "reply_to" (the id it answers, or null), '
-    '"attachments" (file names: discord_attachments saves them), "approved" (true for a stranger\'s message the owner '
-    'let through)}'
+    '"attachments" (file names: discord_attachments saves them), "approved" (true for a stranger\'s message let '
+    'through), and with it "let_through_by" (who let it through: "the owner", or "name (id), trusted" for a trusted '
+    "person's reply)}"
 )
 TOOL_NAMES = (
     'discord_post',
@@ -5698,8 +5827,9 @@ def tool_list(identity):
                 "Read a channel's messages: the first `limit` after the id `after`, or the newest `limit` without it, "
                 'oldest first. Returns JSON {"channel", "messages": [' + MESSAGE + '], "left_out", "after"}. Only the '
                 f"owner's messages, the listed users' and {me}'s own are given, or only those of the authors `from` "
-                f"names; and, without `from`, a stranger's message the owner let through: addressed to {me} with "
-                f'his :{wimsy}: reaction on it, or one he replied to mentioning {me}'
+                f"names; and, without `from`, a stranger's message let through: addressed to {me} with the owner's "
+                f':{wimsy}: reaction on it, or one he or a trusted user replied to mentioning {me} (a trusted '
+                "user's lets through no message the pre-harness rejects, nor one of an author iced or muted)"
                 + (
                     f"; and the reply of someone a post of {me}'s mentioned, to that post and within {MENTION_HOURS} "
                     'h of it'
@@ -5753,7 +5883,7 @@ def tool_list(identity):
             'description': (
                 "Save a message's attachments, each a file of the message's own folder, to open with the Read tool (an "
                 f"image, a log): a message discord_read gives (the owner's, a listed user's, {me}'s own, or a "
-                "stranger's the owner let through), fetched from Discord's CDN without the token. Returns JSON "
+                "stranger's let through), fetched from Discord's CDN without the token. Returns JSON "
                 '{"channel", "message", "folder", "files": [{"name" (as Discord has it), "type", "size", "width" and '
                 '"height" (images), and "path" when saved or "error" saying why not}]}. One over '
                 f'{MOST_SAVE >> 20} MiB ({MOST_SAVE_RDC >> 30} GiB for a RenderDoc .rdc) is not saved, and says so. A '
@@ -5775,7 +5905,7 @@ def tool_list(identity):
                 f"Put a reaction of {me}'s on a message, at once: no draft and no owner's {YES}, so it takes only "
                 f'these: {taken}. Use one instead of a post to say you saw a message or finished it: {seen} when you '
                 f'start on it, then discord_unreact it and {done} when done.{custom} The message is one discord_read '
-                f"gives (the owner's, a listed user's, {me}'s own, or a stranger's the owner let through), never a "
+                f"gives (the owner's, a listed user's, {me}'s own, or a stranger's let through), never a "
                 f'draft.{own} Returns JSON {{"status": "reacted", or "already there" when it was, "channel", '
                 '"message", "emoji"}. Another emoji is an error naming it and these. ' + where
             ),

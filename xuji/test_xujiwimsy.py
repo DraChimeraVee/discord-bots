@@ -348,6 +348,17 @@ class LetThrough(WithXuji):
         self.assertIn(':wimsyxuji:', said)
         self.assertNotIn(':wimsyaogo:', said)
 
+    def test_a_trusted_users_reply_mentioning_xujiwimsy_lets_a_message_through_too(self):
+        theirs = self.fake.say(GENERAL, STRANGER, 'a question for the room')
+        self.fake.say(GENERAL, FRIEND, f'<@{BOT}> look', reply_to=theirs, mentions=[BOT])
+        got = self.tool('discord_read', channel=GENERAL)
+        seen = [(m['id'], m['approved'], m.get('let_through_by')) for m in got['messages']]
+        self.assertEqual(seen[0], (theirs, True, f'friend ({FRIEND}), trusted'))
+        self.assertIn(
+            "another's when his :wimsyxuji: is on it, or his or a trusted person's reply to it mentions XujiWimsy.",
+            aw.instructions(self.settings),
+        )
+
 
 class Posting(WithXuji):
     def test_a_post_reaches_discord_as_its_text_with_no_signature(self):
