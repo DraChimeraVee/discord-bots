@@ -1291,12 +1291,23 @@ class Attachments(WithDiscord):
         self.assertEqual(
             said,
             f"message {number} is not one AogoWimsy gives: neither the owner's ({OWNER}), a trusted user's ({FRIEND}) "
-            f'nor its own, and the owner has not let it through (his :{aw.WIMSY}: reaction, or his reply to it '
-            'mentioning AogoWimsy)',
+            f'nor its own, and neither the owner nor a trusted user let it through (his :{aw.WIMSY}: reaction, or a '
+            'reply of theirs to it mentioning AogoWimsy)',
         )
         self.assertNotIn('tranger', said)
         self.assertEqual(self.cdn(), [])
         self.assertFalse(self.bot.files.exists())
+
+    def test_a_strangers_message_a_trusted_user_replied_to_mentioning_aogo_is_saved(self):
+        # DraVee, 2026-11-20: Fuddles replied to a stranger's message mentioning Aogo, and it never reached the session
+        quoted = self.carrying(GENERAL, STRANGER, [('q.jpg', b'\xff\xd8\xff jpeg', 'image/jpeg')], 'it crashes')
+        self.fake.say(GENERAL, FRIEND, f'<@{BOT}> can you look at this?', reply_to=quoted, mentions=[BOT])
+        got = self.tool('discord_attachments', channel=GENERAL, message=quoted)
+        self.assertEqual([('path' in f, 'error' in f) for f in got['files']], [(True, False)])
+        unasked = self.carrying(GENERAL, STRANGER, [('u.png', PNG, 'image/png')], 'and this')
+        self.fake.say(GENERAL, FRIEND, 'answering them, no mention', reply_to=unasked)
+        said = self.error('discord_attachments', channel=GENERAL, message=unasked)
+        self.assertIn('neither the owner nor a trusted user let it through', said)
 
     def test_a_strangers_message_the_owner_replied_to_mentioning_aogo_or_let_through_is_saved(self):
         quoted = self.carrying(GENERAL, STRANGER, [('q.jpg', b'\xff\xd8\xff jpeg', 'image/jpeg')])
@@ -2139,7 +2150,9 @@ class Hearing(WithDiscord):
             return {'trust': 'owner', 'tone': tone, 'reply': 'direct, up to 3'}
         ice = {'ice': '0 strikes of the last 7 days', 'tone': tone}
         if kind == 'approved':
-            why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+            why = (
+                f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
+            )
             return {'trust': 'let-through', 'reply': f'draft only: {why}'} | ice
         if who == FRIEND:
             said = {'trust': 'trusted', 'weight': 'high (30 an hour)', 'heard': f'{heard} of 30 this hour'}
@@ -2231,7 +2244,7 @@ class Channels(Hearing):
         number = self.heard(GENERAL, OWNER, asked, reply_to=theirs, mention_roles=[BOT_ROLE])
         quote = f'\n\nReplying to Stranger ({STRANGER}), message {theirs}:\nthe percent is the current game only'
         meta = {'kind': 'message', 'author': 'DraVee', 'author_id': OWNER, 'channel': GENERAL, 'message_id': number}
-        meta.update(reply_to=theirs, quoted_author='Stranger', quoted_author_id=STRANGER)
+        meta.update(reply_to=theirs, quoted_author='Stranger', quoted_author_id=STRANGER, let_through_by='the owner')
         self.assertEqual(self.pushes, [(asked + quote, meta | self.about(OWNER))])
         self.assertEqual(self.bot.approved, {theirs})
 
@@ -2280,15 +2293,47 @@ class Channels(Hearing):
         meta.update(
             reply_to=theirs, quoted_author='Stranger', quoted_author_id=STRANGER, quoted_attachments='crash.log'
         )
+        meta['let_through_by'] = 'the owner'
         self.assertEqual(self.pushes, [(asked + quote, meta | self.about(OWNER))])
         self.assertEqual(self.bot.approved, {theirs})
         self.reacted(GENERAL, theirs, WIMSY, OWNER)  # through already: once
         self.assertEqual(len(self.pushes), 1)
         got = self.tool('discord_read', channel=GENERAL, after=before)
-        self.assertEqual([(m['id'], m['approved']) for m in got['messages']], [(theirs, True), (number, False)])
+        seen = [(m['id'], m['approved'], m.get('let_through_by')) for m in got['messages']]
+        self.assertEqual(seen, [(theirs, True, 'the owner'), (number, False, None)])
         self.assertEqual(got['left_out'], 0)
         alone = self.tool('discord_read', channel=GENERAL, after=before, limit=1)  # his reply is not in this page
         self.assertEqual([(m['id'], m['approved']) for m in alone['messages']], [(theirs, True)])
+
+    def test_a_trusted_users_reply_mentioning_aogo_carries_the_message_they_replied_to_and_lets_it_through(self):
+        # DraVee, 2026-11-20: "also we need to fix when trusted people reply and mention you like fuddles did"
+        before = self.fake.say(GENERAL, OWNER, 'before')
+        theirs = self.fake.say(GENERAL, STRANGER, 'it fails on Windows', attachments=[{'filename': 'build.log'}])
+        asked = f'<@{BOT}> can you look at this one?'
+        number = self.heard(GENERAL, FRIEND, asked, reply_to=theirs, mentions=[BOT])
+        by = f'friend ({FRIEND}), trusted'
+        quote = f'\n\nReplying to Stranger ({STRANGER}), message {theirs}, let through by {by}:\nit fails on Windows'
+        meta = {'kind': 'message', 'author': 'friend', 'author_id': FRIEND, 'channel': GENERAL, 'message_id': number}
+        meta.update(reply_to=theirs, quoted_author='Stranger', quoted_author_id=STRANGER)
+        meta.update(quoted_attachments='build.log', let_through_by=by)
+        self.assertEqual(self.pushes, [(asked + quote, meta | self.about(FRIEND))])  # direct, up to 3: to theirs
+        self.assertEqual((self.bot.approved, list(self.bot.vouched)), (set(), [theirs]))
+        stranger = self.about(STRANGER, kind='approved')
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        seen = [(m['id'], m['approved'], m.get('let_through_by'), m['trust'], m['reply']) for m in got['messages']]
+        self.assertEqual(
+            seen,
+            [
+                (theirs, True, by, 'let-through', stranger['reply']),  # a draft only, as the owner's letting through
+                (number, False, None, 'trusted', 'direct, up to 3'),
+            ],
+        )
+        self.bot.vouched.clear()  # a server that did not hear it reads their reply among the messages after it
+        alone = self.tool('discord_read', channel=GENERAL, after=before, limit=1)
+        self.assertEqual(alone['messages'], [])
+        self.assertEqual(self.tool('discord_react', channel=GENERAL, message=theirs, emoji=EYES)['status'], 'reacted')
+        got = self.tool('discord_read', channel=GENERAL, after=before)
+        self.assertEqual([(m['id'], m['approved']) for m in got['messages']], [(theirs, True), (number, False)])
 
     def test_a_reply_whose_answered_message_the_event_lacks_reads_it_from_discord(self):
         theirs = self.fake.say(GENERAL, STRANGER, 'asked before')
@@ -2299,16 +2344,21 @@ class Channels(Hearing):
         self.assertTrue(self.pushes[0][0].endswith(f'message {theirs}:\nasked before'))
         self.assertEqual(len(self.fake.posts('GET', f'/channels/{GENERAL}/messages/{theirs}')), 1)
 
-    def test_only_the_owners_reply_with_a_mention_lets_a_message_through(self):
+    def test_a_reply_without_a_mention_lets_nothing_through(self):
         theirs = self.fake.say(GENERAL, STRANGER, 'a question for the room')
-        self.heard(GENERAL, FRIEND, 'asking <@1000000000000000001>', reply_to=theirs, mentions=[BOT])
+        self.heard(GENERAL, FRIEND, 'answering them, no mention', reply_to=theirs)
         self.heard(GENERAL, OWNER, 'answering them, no mention', reply_to=theirs)
-        self.assertEqual(
-            [(text, 'quoted_author_id' in meta) for text, meta in self.pushes],
-            [('asking <@1000000000000000001>', False)],
-        )
-        self.assertEqual(self.bot.approved, set())
+        self.assertEqual(self.pushes, [])
+        self.assertEqual((self.bot.approved, self.bot.vouched), (set(), {}))
         self.assertNotIn(theirs, [m['id'] for m in self.tool('discord_read', channel=GENERAL)['messages']])
+
+    def test_a_trusted_users_wimsy_lets_nothing_through(self):
+        theirs = self.heard(GENERAL, STRANGER, f'<@{BOT}> can you look?', mentions=[BOT])
+        self.reacted(GENERAL, theirs, WIMSY, FRIEND)
+        self.assertEqual((self.pushes, self.bot.approved, self.bot.vouched), ([], set(), {}))
+        self.assertNotIn(theirs, [m['id'] for m in self.tool('discord_read', channel=GENERAL)['messages']])
+        self.reacted(GENERAL, theirs, WIMSY, OWNER)  # the reaction stays the owner's alone
+        self.assertEqual([meta['kind'] for _, meta in self.pushes], ['approved'])
 
     def test_the_owners_wimsy_elsewhere_pushes_nothing(self):
         plain = self.heard(GENERAL, STRANGER, 'not to aogo')
@@ -2624,13 +2674,14 @@ class Greet(Hearing):
         self.assertNotIn(LINE, none)
 
 
-HELP_TEXT = f'To ask me something, mention <@{BOT}> with what you need; DraVee lets it through.'
+HELP_TEXT = f'To ask me something, mention <@{BOT}> with what you need; DraVee, or someone he trusts, lets it through.'
 OWNERS_HELP = (
     'Yours alone:\n'
     '/aogo allow user [time]: their messages to me reach the session; time 2h, 1d, 7d or perm, 1d without one\n'
     '/aogo deny user: takes their allow back\n'
     '/aogo allowed: who is allowed, and until when\n'
-    '/aogo trust user: they reach the session as one you trust, 30 messages an hour\n'
+    '/aogo trust user: they reach the session as one you trust, 30 messages an hour, and their reply mentioning me '
+    'lets the message it answers through\n'
     '/aogo untrust user: takes their trust back\n'
     '/aogo weight user level [time]: mute 0, low 3, normal 10 or high 30 of their messages an hour reach the session, '
     "1d without a time; then their level's again\n"
@@ -3950,7 +4001,7 @@ class Direct(Statused):
         self.status()
         theirs = self.fake.say(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
         self.fake.react(theirs, WIMSY, OWNER)
-        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        why = f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
         self.assertEqual(self.direct(reply_to=theirs), self.drafted(why))
         asked = self.fake.say(GENERAL, STRANGER, f'<@{BOT}> push it', mentions=[BOT])
         self.tool('discord_freeze', channel=GENERAL, message=asked, kind='owner-call')
@@ -4238,7 +4289,7 @@ class About(Statused):
         self.reacted(GENERAL, theirs, WIMSY, OWNER)
         meta = self.pushes[-1][1]
         self.assertEqual((meta['kind'], meta['trust']), ('approved', 'let-through'))
-        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        why = f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
         self.assertEqual(meta['reply'], f'draft only: {why}')
         self.assertNotIn('weight', meta)
         number, said = self.told(FRIEND, "what's DraVee's email?")
@@ -4538,7 +4589,7 @@ class Modes(Statused):
         )
         let_through = self.heard(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
         self.reacted(GENERAL, let_through, WIMSY, OWNER)
-        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        why = f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
         held = 'held until the owner is home (mode trabalho), then as a draft'
         self.assertEqual(self.pushes[-1][1]['reply'], f'draft only, {held}: {why}')
         said = self.direct(reply_to=let_through)
@@ -4848,7 +4899,7 @@ class Approver(Statused):
         self.assertEqual((flags(DM)[-1], flags(FRIEND_DM)[-1]), (aw.SILENT, None))
         let_through = self.heard(GENERAL, CALLERS[0], f'<@{BOT}> hi', mentions=[BOT])
         self.reacted(GENERAL, let_through, WIMSY, OWNER)
-        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        why = f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
         theirs = f"at once a draft for the approver, friend ({FRIEND}), the owner's silent (mode trabalho)"
         self.assertEqual(self.pushes[-1][1]['reply'], f'draft only, {theirs}: {why}')
         said = self.direct(reply_to=let_through)
@@ -5176,7 +5227,7 @@ class Mentioned(Statused):
         self.assertEqual((self.pushes, self.greeted()), ([], [elsewhere]))  # greeted as any stranger
         self.heard(GENERAL, OTHER_PERSON, f'<@{BOT}> and this?', mentions=[BOT])
         self.assertEqual(self.pushes, [])
-        why = f'its author is a stranger, whom the owner alone lets through: his {YES} is the permission'
+        why = f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
         self.status()
         self.assertEqual(self.direct(reply_to=elsewhere), self.drafted(why))
         said = self.error('discord_react', channel=GENERAL, message=elsewhere, emoji=EYES)
@@ -5365,6 +5416,91 @@ class Mentioned(Statused):
             "; and the reply of someone a post of AogoWimsy's mentioned, to that post and within 24 h of it. left_out",
             aw.tool_list(aw.AOGO)[2]['description'],
         )
+
+
+class LetThrough(Statused):
+    """a stranger's message let through by a reply mentioning AogoWimsy: the owner's, and since DraVee's "also we need
+    to fix when trusted people reply and mention you like fuddles did" (2026-11-20) a trusted person's, which gives the
+    stranger no more than the owner's does: never an allowed person's reply, never a rejected, iced or muted author's
+    message, and an answer to the reply held by the rules of the message it carries. STRANGER is allowed here"""
+
+    def ids(self, after=None):
+        return [m['id'] for m in self.tool('discord_read', channel=GENERAL, after=after)['messages']]
+
+    def test_an_allowed_users_reply_mentioning_aogo_lets_nothing_through(self):
+        theirs = self.fake.say(GENERAL, CALLERS[0], 'a question for the room')
+        asked = f'<@{BOT}> can you answer them?'
+        number = self.heard(GENERAL, STRANGER, asked, reply_to=theirs, mentions=[BOT])
+        self.assertEqual(
+            [(text, meta['trust'], meta.get('quoted_author_id')) for text, meta in self.pushes],
+            [(asked, 'allowed for good', None)],
+        )
+        self.assertEqual((self.bot.approved, self.bot.vouched), (set(), {}))
+        self.assertEqual(self.ids(), [number])
+        said = self.error('discord_react', channel=GENERAL, message=theirs, emoji=EYES)
+        self.assertIn('neither the owner nor a trusted user let it through', said)
+
+    def test_a_rejected_an_iced_and_a_muted_authors_message_is_named_not_carried(self):
+        invisible = self.fake.say(GENERAL, CALLERS[0], 'look\u200b at this')
+        self.heard(GENERAL, FRIEND, f'<@{BOT}> this?', reply_to=invisible, mentions=[BOT])
+        text, meta = self.pushes[-1]
+        self.assertIn(f'message {invisible}, which does not reach you: the pre-harness rejects it, invisible (', text)
+        self.assertNotIn('look', text)
+        self.assertEqual([key for key in meta if key.startswith(('quoted', 'let_through'))], [])
+        first = self.heard(GENERAL, CALLERS[1], f'<@{BOT}> first', mentions=[BOT])
+        self.reacted(GENERAL, first, WIMSY, OWNER)
+        self.tool('discord_freeze', channel=GENERAL, message=first, kind='harness')
+        iced = self.fake.say(GENERAL, CALLERS[1], 'again')
+        self.heard(GENERAL, FRIEND, f'<@{BOT}> and this?', reply_to=iced, mentions=[BOT])
+        until = aw.utc(self.now + 7200)
+        said = f'message {iced}, which does not reach you: its author is iced until {until} (harness)'
+        self.assertTrue(self.pushes[-1][0].endswith(said))
+        self.assertEqual(self.bot.vouched, {})
+        self.assertEqual([number in self.ids() for number in (invisible, iced)], [False, False])
+        said = self.error('discord_attachments', channel=GENERAL, message=iced)
+        self.assertEqual(
+            said,
+            f"message {iced} is not one AogoWimsy gives: a trusted user's reply let it through, but its author is iced "
+            f'until {until} (harness)',
+        )
+        muted = self.fake.say(GENERAL, CALLERS[2], 'muted once allowed')
+        self.use(OWNER, 'allow', user=CALLERS[2], time='2h')
+        self.use(OWNER, 'weight', user=CALLERS[2], level='mute', time='1d')
+        self.now += 3 * 3600  # the allow and the ice ran out, the mute did not
+        self.heard(GENERAL, FRIEND, f'<@{BOT}> and theirs?', reply_to=muted, mentions=[BOT])
+        said = 'which does not reach you: its author weighs mute: none of their messages reach the session'
+        self.assertTrue(self.pushes[-1][0].endswith(f'message {muted}, {said}'))
+        self.assertEqual(self.bot.vouched, {})
+        self.assertEqual([number in self.ids() for number in (invisible, iced, muted)], [False, True, False])
+
+    def test_a_muted_trusted_users_reply_lets_nothing_through(self):
+        self.use(OWNER, 'weight', user=FRIEND, level='mute', time='1d')
+        self.pushes.clear()
+        theirs = self.fake.say(GENERAL, CALLERS[0], 'a clean question')
+        self.heard(GENERAL, FRIEND, f'<@{BOT}> look', reply_to=theirs, mentions=[BOT])
+        self.assertEqual((self.pushes, self.bot.vouched), ([], {}))
+        self.assertNotIn(theirs, self.ids())
+
+    def test_a_direct_answer_to_a_trusted_users_reply_is_held_by_the_rules_of_the_message_it_carries(self):
+        self.status()
+        theirs = self.fake.say(GENERAL, CALLERS[0], 'where does he live?')
+        asked = self.heard(GENERAL, FRIEND, f'<@{BOT}> can you answer?', reply_to=theirs, mentions=[BOT])
+        why = (
+            f'message {asked} lets through message {theirs}, which carries owner-info (it asks about DraVee himself: '
+            "answer only with DraVee's OK)"
+        )
+        meta = self.pushes[-1][1]
+        caution = "owner-info: it asks about DraVee himself: answer only with DraVee's OK"
+        self.assertEqual((meta['reply'], meta['caution']), (f'draft only: {why}', caution))  # the stranger's rule
+        self.assertEqual(self.direct(reply_to=asked), self.drafted(why))
+        plain = self.fake.say(GENERAL, CALLERS[0], 'how do I build it?')
+        fine = self.heard(GENERAL, FRIEND, f'<@{BOT}> this one?', reply_to=plain, mentions=[BOT])
+        self.assertEqual(self.pushes[-1][1]['reply'], 'direct, up to 3')
+        self.assertEqual(self.direct(reply_to=fine), self.went('trusted', left=2))
+        stranger = (
+            f"its author is a stranger, and an answer to them is the owner's to check: his {YES} is the permission"
+        )
+        self.assertEqual(self.direct(reply_to=plain), self.drafted(stranger))
 
 
 class Tone(Owned):
