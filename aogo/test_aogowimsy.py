@@ -56,10 +56,11 @@ PNG_EMOJI = b'\x89PNG\r\n\x1a\n an emoji'
 OTHER_BOT = '1000000000000000006'  # another bot on the server: a stranger, and a bot
 APP = '900000000000000001'  # AogoWimsy's application, whose id is not its user's here
 CALLERS = [f'10000000000000001{n:02d}' for n in range(12)]  # strangers the fake knows by id alone
-# the greeting as DraVee worded it (2026-11-02), and the one mention it lets ping
+# the greeting as DraVee worded it (2026-11-02; "someone he trusts" since 2026-11-20, when a trusted person's reply
+# began to let a message through), and the one mention it lets ping
 LINE = (
-    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets "
-    f'through. <@{OWNER}>'
+    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee, or "
+    f'someone he trusts, lets through. <@{OWNER}>'
 )
 PINGS = {'parse': [], 'users': [OWNER], 'replied_user': False}
 READY = {'user': {'id': BOT}, 'application': {'id': APP}, 'session_id': 's', 'resume_gateway_url': 'ws://127.0.0.1:9'}

@@ -88,8 +88,8 @@ A stranger who calls AogoWimsy in a channel it reads (a mention of it or of its 
 messages) gets at once, from the server itself and with no draft, this reply, which pings the owner and no one else
 (`allowed_mentions` names his id alone, and not the person it replies to):
 
-> I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets
-> through. <@AOGOWIMSY_OWNER>
+> I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee, or
+> someone he trusts, lets through. <@AOGOWIMSY_OWNER>
 
 Once a person each 24 hours, and 10 an hour at most, everyone together (`AOGOWIMSY_GREET_HOURS` and
 `AOGOWIMSY_GREET_PER_HOUR` set both, below); past a limit the call is only counted, as any other stranger's message.

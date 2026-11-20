@@ -243,8 +243,8 @@ class Identity(NamedTuple):
 # this line alone, as a reply, pinging the owner and no one else. Each limit an env file key may set (GREET_LIMITS);
 # past one the call is only counted, as any other stranger's message.
 GREETING = (
-    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee lets "
-    'through. <@{owner}>'
+    "I'm Aogo, DraVee's AI assistant (Claude) working on ScarletNX: code, reviews, tests. I act on what DraVee, or "
+    'someone he trusts, lets through. <@{owner}>'
 )
 GREET_HOURS = 24  # hours before one person is greeted again
 GREET_PER_HOUR = 10  # greetings in an hour at most, everyone's together; 0 greets no one
