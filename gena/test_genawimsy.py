@@ -349,6 +349,15 @@ class Listener(unittest.TestCase):
             ],
         )
 
+    def test_no_server_found_is_said_with_the_sandbox_as_a_cause(self):
+        self.assertEqual(self.listen(), 1)
+        self.assertEqual(
+            self.out.getvalue(),
+            f'GenaWimsy: no GenaWimsy server listens for this session (none of {self.root}/genawimsy/<pid>.sock for '
+            "its parents 300, 200): is genawimsy one of its MCP servers, and connected? Or agy's sandbox hides the "
+            'folder: run this with BypassSandbox.\n',
+        )
+
     def test_a_server_that_stops_before_anything_came_is_said_with_1(self):
         relay = aw.Relay(self.root / 'genawimsy', 200, once=True)
         relay.start(self.stop, None)

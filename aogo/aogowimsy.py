@@ -6322,7 +6322,8 @@ def listen_to(identity, out, environ=None, proc=Path('/proc'), parent=None):
         return 1
     print(
         f'{me}: no {me} server listens for this session (none of {folder}/<pid>.sock for its parents '
-        f'{", ".join(map(str, pids))}): is {identity.server} one of its MCP servers, and connected?',
+        f'{", ".join(map(str, pids))}): is {identity.server} one of its MCP servers, and connected?'
+        + (" Or agy's sandbox hides the folder: run this with BypassSandbox." if identity.once else ''),
         file=out,
         flush=True,
     )
