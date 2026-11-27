@@ -56,7 +56,9 @@ GenaWimsy's client, agy, wakes its session when a background command ends, and a
 runs wakes no one (its system prompt: "the system will notify you when they finish"). So GenaWimsy's monitor ends once
 it has something (Identity.once): the server gives each monitor that connects one delivery, the events that came while
 none listened (Relay's backlog) or the next one, then closes it, and genawimsy.py --listen prints them and ends; the
-session answers and starts it again. Its instructions ask the session to run it as a background command.
+session answers and starts it again. Its instructions ask the session to run it as a background command, but agy
+shows its model no server's instructions (it saves them to ~/.gemini/antigravity-cli/mcp/<server>/instructions.md and
+lists the tools' names), so each tool result says so too while no listener of the session's waits.
 
 A stranger (neither the owner, trusted nor allowed) who calls AogoWimsy in a channel it reads (a mention of it or its
 role, or a reply to one of its messages; a person's, not a bot's nor a webhook's) gets at once, from the server
@@ -6420,6 +6422,17 @@ class Server:
             news.insert(0, f'{dropped} older news were left out: {self.title} keeps the newest {MOST_NEWS}')
         for text in news:
             result['content'].append({'type': 'text', 'text': f'{self.title} news: {text}'})
+        if self.relay and self.relay.once:
+            with self.relay.guard:
+                waiting = bool(self.relay.peers)
+            if not waiting:  # agy shows its model no server's instructions, only the tools' names: each result says it
+                result['content'].append(
+                    {
+                        'type': 'text',
+                        'text': f'{self.title} news: no listener of yours waits, so Discord wakes no one: run '
+                        f'`{listen_command(self.identity)}` in the background (run_command, WaitMsBeforeAsync 500)',
+                    }
+                )
         return result
 
     def notified(self, method, params):

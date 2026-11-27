@@ -434,8 +434,12 @@ holds but for these:
   `GenaWimsy: once you have answered, start this listener again: <its command>`, and ends with 0. The task's end wakes
   her; she answers and starts it again. A server that stops before anything came is said, and it ends with 1.
 - **Its instructions** ask the session to run that command in the background at its start (`run_command` with
-  `WaitMsBeforeAsync` 500) and again after each answer. agy's own bound on a server's instructions is not measured,
-  so they are held to Grok Build's 2048 bytes; past it, stderr and the first tool result say so, naming agy.
+  `WaitMsBeforeAsync` 500) and again after each answer. But `agy` shows its model no server's instructions: it saves
+  them to `~/.gemini/antigravity-cli/mcp/<server>/instructions.md` and lists the tools' names, lazy (a headless `agy`
+  run against a test server, 2026-11-27, quoted what it was given). So while no listener of the session's waits, each
+  tool result ends with `GenaWimsy news: no listener of yours waits, so Discord wakes no one: run <its command> in the
+  background (run_command, WaitMsBeforeAsync 500)`. The instructions are held to Grok Build's 2048 bytes; past it,
+  stderr and the first tool result say so, naming agy.
 - **The news** the gateway brings while no monitor listens wait for the next monitor and also come with the next
   tool result, as XujiWimsy's do.
 - **Its emojis** are the unicode ones alone (no drawings of Gena yet: no `discord_emoji_upload`); the owner's
@@ -506,7 +510,8 @@ server, instructions (the listener as a background command, within 2048 bytes, t
 in its own names (the unicode emojis alone, no upload), the clients (Claude Code refused naming AogoWimsy, and
 AogoWimsy refusing agy naming both bots), its direct posts at a fixed interval, `:wimsygena:` letting a message through,
 `/gena`, its monitors (one delivery each and closed, what came while none listened kept for the next and for the next
-tool result, past 20 the oldest counted, a monitor gone before its delivery leaving them) and `--listen` (its one
+tool result, past 20 the oldest counted, a monitor gone before its delivery leaving them, each result saying how to
+start one while none waits) and `--listen` (its one
 delivery and what to do, ending with 0; a server stopped before anything came, 1; the program itself as agy runs it).
 
 ## The Discord applications

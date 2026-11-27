@@ -266,8 +266,20 @@ class Monitors(WithGena):
         later = self.monitor()  # nothing waits: it listens for the next
         self.server.push('third', {'kind': 'notice'})
         self.assertEqual(later.readline(), 'notice: third\n')
+        self.assertEqual(self.relay.peers, [])  # the third went to the monitor, which was closed
         content = self.answer('discord_read', channel=GENERAL)['result']['content']
-        self.assertEqual([each['text'] for each in content[1:]], ['GenaWimsy news: first', 'GenaWimsy news: second'])
+        self.assertEqual([each['text'] for each in content[1:3]], ['GenaWimsy news: first', 'GenaWimsy news: second'])
+
+    def test_while_no_listener_waits_each_result_says_how_to_start_it_as_agy_shows_no_instructions(self):
+        reminder = (
+            'GenaWimsy news: no listener of yours waits, so Discord wakes no one: run '
+            f'`{aw.listen_command(aw.GENA)}` in the background (run_command, WaitMsBeforeAsync 500)'
+        )
+        content = self.answer('discord_read', channel=GENERAL)['result']['content']
+        self.assertEqual(content[-1]['text'], reminder)
+        self.monitor()
+        content = self.answer('discord_read', channel=GENERAL)['result']['content']
+        self.assertEqual(len(content), 1)  # one waits: nothing to say
 
     def test_past_twenty_the_oldest_that_wait_go_and_the_next_monitor_is_told_how_many(self):
         for number in range(1, 24):
