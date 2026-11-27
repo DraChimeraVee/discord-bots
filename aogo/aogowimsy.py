@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""AogoWimsy and XujiWimsy: a coding session on Discord as a bot of its own, its posts approved by its owner first, or
-AogoWimsy's direct within the rules he sets.
+"""AogoWimsy, XujiWimsy and GenaWimsy: a coding session on Discord as a bot of its own, its posts approved by its owner
+first, or direct within the rules he sets.
 
     aogowimsy.py [--env FILE]           AogoWimsy, Aogo (the Claude Code session); FILE:
                                         ~/.config/aogowimsy/aogowimsy.env when not given; mode 600 or stricter
     ../xuji/xujiwimsy.py [--env FILE]   XujiWimsy, Xuji (the Grok Build session): this code with Xuji's identity
                                         (IDENTITIES), its bot and ~/.config/xujiwimsy/xujiwimsy.env
+    ../gena/genawimsy.py [--env FILE]   GenaWimsy, Gena (the session in Antigravity's agy): this code with Gena's
+                                        identity, its bot and ~/.config/genawimsy/genawimsy.env
 
 A local MCP server that its client starts and talks to on stdin and stdout, a JSON-RPC 2.0 message a line, through
 the initialize handshake (protocol 2025-11-25 back to 2024-11-05): Claude Code registers no channel on revision
 2026-07-28, which cannot carry its messages. AogoWimsy serves Claude Code alone (its clientInfo name, claude-code)
-and XujiWimsy any client but Claude Code: each refuses the other's client, naming both, so a session never starts
-the other one's bot. Its tools:
+and XujiWimsy and GenaWimsy any client but Claude Code: each refuses the other's client, naming both, so a session
+never starts the other one's bot. Its tools:
 
     discord_post         a draft in the owner's DMs with the bot, with a check mark and a cross: only the owner's
                          check mark posts it (or the approver's, on their copy), as it is, pinging no one; with
@@ -50,6 +52,13 @@ runs whose every printed line comes in as a turn. So XujiWimsy pushes the same e
 the monitors on its Unix socket (Relay), which xujiwimsy.py --listen connects to from the session's monitor; its
 instructions ask the session to start it. With no monitor listening, the session hears through discord_wait, and the
 gateway's news and the owner's answers to drafts come with its next tool result.
+GenaWimsy's client, agy, wakes its session when a background command ends, and a line that command prints while it
+runs wakes no one (its system prompt: "the system will notify you when they finish"). So GenaWimsy's monitor ends once
+it has something (Identity.once): the server gives each monitor that connects one delivery, the events that came while
+none listened (Relay's backlog) or the next one, then closes it, and genawimsy.py --listen prints them and ends; the
+session answers and starts it again. Its instructions ask the session to run it as a background command, but agy
+shows its model no server's instructions (it saves them to ~/.gemini/antigravity-cli/mcp/<server>/instructions.md and
+lists the tools' names), so each tool result says so too while no listener of the session's waits.
 
 A stranger (neither the owner, trusted nor allowed) who calls AogoWimsy in a channel it reads (a mention of it or its
 role, or a reply to one of its messages; a person's, not a bot's nor a webhook's) gets at once, from the server
@@ -188,6 +197,8 @@ class Identity(NamedTuple):
     direct: bool = False  # True: it may post at once, within its rules, the quota and context of Claude Code's
     mentions: bool = False  # True: someone a post of its mentions may reply to that post (MENTION_HOURS)
     modes: bool = False  # True: its command sets where the owner is (MODES) and an approver of its drafts
+    client: str = 'Claude Code'  # the client its session runs in, as its texts name it
+    once: bool = False  # True: its client wakes when a command ends, not on each line: its monitor ends on an event
 
     def key(self, name):
         return f'{self.prefix}_{name}'
@@ -437,9 +448,26 @@ XUJI = Identity(
     drawn=('wimsyxuji_eyes', 'wimsyxuji_done', 'wimsyxuji_thumbsup', 'wimsyxuji_no'),
     wimsy='wimsyxuji',
     program='xuji/xujiwimsy.py',
+    client='Grok Build',
+)
+# Gena's: no drawings of her yet (the unicode emojis alone), and the owner's emoji named for her, which a server has
+# once it is drawn and uploaded
+GENA = Identity(
+    'genawimsy',
+    'GenaWimsy',
+    'Gena',
+    'GENAWIMSY',
+    '~/.config/genawimsy/genawimsy.env',
+    claude=False,
+    command='gena',
+    direct=True,
+    wimsy='wimsygena',
+    program='gena/genawimsy.py',
+    client='agy',
+    once=True,
 )
 ROOT = Path(__file__).resolve().parent.parent  # the repository's root, which Identity.program starts from
-IDENTITIES = (AOGO, XUJI)
+IDENTITIES = (AOGO, XUJI, GENA)
 CLAUDE_CODE = 'claude-code'  # the clientInfo name Claude Code's MCP client gives (2.1.310)
 NAME = AOGO.server  # stderr's prefix: main sets the one it runs
 LIMIT = 2000  # a Discord message's letters
@@ -1155,6 +1183,14 @@ def instructions(settings):
             'refused at once: draft, status, channel, and message_id once posted), kind="error" or "notice" (the '
             'gateway' + ('; a change of who reaches you' if command else '') + '). ' + answering(settings.identity)
         )
+    if settings.identity.once:
+        return said + (
+            f'Discord reaches you through a listener: at the start, run `{listen_command(settings.identity)}` in the '
+            'background (run_command, WaitMsBeforeAsync 500). It ends with what came, a line each (a text cut short is '
+            'whole in discord_read), which wakes you; answer, then run it again (what comes meanwhile waits). Without '
+            f"it, discord_wait hears a channel. The owner's DMs with {me} are the channel of a draft's link. "
+            + answering(settings.identity)
+        )
     return said + (
         "Discord reaches you through a monitor: at the session's start, run the monitor tool, persistent, "
         f'description "{me}", command `{listen_command(settings.identity)}`; each line it prints is an event for you, '
@@ -1189,8 +1225,14 @@ def cut_by_grok(settings, text):
     if identity.claude or size <= GROK_SHOWS:
         return None
     ids = sum(len(each) + 2 for each in settings.users | (settings.channels or frozenset()))
+    shows = (
+        f'Grok Build shows its model the first {GROK_SHOWS}'
+        if identity.client == 'Grok Build'
+        else f'{identity.client} may show its model no more than Grok Build, the first {GROK_SHOWS} (its own limit is '
+        'not measured)'
+    )
     return (
-        f"{identity.title}'s instructions are {size} bytes and Grok Build shows its model the first {GROK_SHOWS}: "
+        f"{identity.title}'s instructions are {size} bytes and {shows}: "
         f'the end of them (how to answer, attachments) is lost. List fewer ids in {identity.key("USERS")} or '
         f'{identity.key("CHANNELS")}, which take {ids} bytes of them'
     )
@@ -1207,12 +1249,11 @@ def reacting_text(identity):
             f'then discord_unreact it and put {done} when done; {thumbs} agreed, {no} cannot, each its unicode one '
             'while the server lacks it. discord_quick replies with one alone; a text goes through discord_post. '
         )
-    if not identity.drawn:  # kept short: Grok Build shows its model the first GROK_SHOWS bytes
+    if not identity.drawn:  # GenaWimsy's, Xuji's text in the unicode ones: within GROK_SHOWS bytes
         return (
-            f'To say you saw a message or did what it asked, react to it with discord_react rather than post: '
-            f'{reactions_text(identity)}; {seen} when you start, then discord_unreact it and put {done} when done. A '
-            'reaction goes out at once, with no draft, and only these; so does discord_quick, a reply of one of them '
-            f"alone, which takes no text: a text goes through discord_post and the owner's {YES}. "
+            f'React rather than post, at once and with no draft: discord_react {EYES} when you start on a message, '
+            f'then discord_unreact it and put {YES} when done; {THUMBS} agreed, {NO} cannot. discord_quick replies '
+            'with one alone; a text goes through discord_post. '
         )
     return (
         'To say you saw a message or finished what it asked, react to it with discord_react instead of posting, the '
@@ -2935,7 +2976,7 @@ class Wimsy:
         DIRECT_RANGE; none at QUOTA_STOP, nor with a file missing, stale or another session's, nor with the mode
         unknown"""
         path, base = self.status_file(), self.settings.direct_minutes
-        if not self.settings.identity.claude:  # Grok Build reports no quota, context nor agents: a fixed interval
+        if not self.settings.identity.claude:  # no other client's quota, context nor agents are read: fixed
             return Pace(
                 base, f'{self.settings.identity.key("DIRECT_MINUTES")} {base}, fixed: its client reports no quota'
             )
@@ -6043,10 +6084,11 @@ def refusal(identity, client):
         return None
     other = next(each for each in IDENTITIES if each.claude != identity.claude)
     if identity.claude:
+        others = ' or '.join(f'{each.title} ({each.server})' for each in IDENTITIES if not each.claude)
         return (
             f'clientInfo.name is {shown(client)}, not "{CLAUDE_CODE}": {identity.title} is {identity.who}\'s, for '
-            f'Claude Code alone; another client runs {other.title} ({other.server}) and keeps {identity.server} off '
-            f'(Grok Build: grok mcp disable {identity.server})'
+            f'Claude Code alone; another client runs {others} and keeps {identity.server} off '
+            f'(Grok Build: grok mcp disable {identity.server}; agy: agy mcp remove {identity.server})'
         )
     return (
         f'clientInfo.name is "{CLAUDE_CODE}": {identity.title} is {identity.who}\'s, for any client but Claude Code, '
@@ -6095,11 +6137,14 @@ def event_line(content, meta):
 class Relay:
     """what a server with no channel pushes, a line each (event_line) to every monitor listening on its Unix socket:
     <runtime folder>/<client pid>.sock, which `--listen` finds among its own processes' parents. Folder 700, socket
-    600: the user's processes alone connect"""
+    600: the user's processes alone connect. once (a client that wakes when a command ends): each monitor gets one
+    delivery and is closed, so its command ends; what comes while none listens waits for the next one, the newest
+    MOST_NEWS, the older ones counted"""
 
-    def __init__(self, folder, client):
+    def __init__(self, folder, client, once=False):
         self.path = Path(folder) / f'{client}.sock'
         self.guard, self.peers, self.sock = threading.Lock(), [], None
+        self.once, self.backlog, self.dropped = once, [], 0
 
     def open(self):
         """the socket bound; one a stopped server left is taken over, one a live server holds is an OSError. The
@@ -6152,13 +6197,17 @@ class Relay:
                     continue
                 peer.settimeout(2.0)  # a monitor that stops reading is dropped, never waited on
                 with self.guard:
+                    if self.once and self.backlog:
+                        self.deliver(peer)
+                        continue
                     self.peers.append(peer)
                 log(f'monitors: one more listens ({len(self.peers)})')
         finally:
             self.close()
 
     def send(self, line):
-        """line to every monitor: how many got it; one that cannot take it is dropped"""
+        """line to every monitor: how many got it; one that cannot take it is dropped. once: each that got it is
+        closed, and with none it waits in the backlog"""
         data = line.encode() + b'\n'
         with self.guard:
             kept = []
@@ -6169,8 +6218,33 @@ class Relay:
                 except OSError as error:
                     peer.close()
                     log(f'monitors: one is gone ({error.strerror or error})')
-            self.peers = kept
+            if not self.once:
+                self.peers = kept
+                return len(kept)
+            for peer in kept:
+                peer.close()  # its one delivery: its command ends, which wakes the session
+            self.peers = []
+            if not kept:
+                self.backlog.append(line)
+                if len(self.backlog) > MOST_NEWS:
+                    del self.backlog[0]
+                    self.dropped += 1
             return len(kept)
+
+    def deliver(self, peer):
+        """the backlog to a monitor that just connected, then closed; kept when it cannot take it. Under guard"""
+        lines = list(self.backlog)
+        if self.dropped:
+            lines.insert(0, f'notice: {self.dropped} older events were left out: the newest {MOST_NEWS} waited')
+        try:
+            peer.sendall(''.join(each + '\n' for each in lines).encode())
+        except OSError as error:
+            log(f'monitors: one is gone before its delivery ({error.strerror or error}); {len(lines)} lines wait')
+        else:
+            log(f'monitors: {len(lines)} lines that waited went to a monitor')
+            self.backlog, self.dropped = [], 0
+        finally:
+            peer.close()
 
     def close(self):
         with self.guard:
@@ -6196,7 +6270,7 @@ def alive(pid):
 
 def relay_for(identity, client, environ=None):
     """the monitors' socket of a server with no channel, named for its client's pid; None for a claude/channel"""
-    return None if identity.claude else Relay(runtime_folder(identity.server, environ), client)
+    return None if identity.claude else Relay(runtime_folder(identity.server, environ), client, identity.once)
 
 
 def ancestors(pid, proc=Path('/proc')):
@@ -6212,7 +6286,7 @@ def ancestors(pid, proc=Path('/proc')):
 def listen_to(identity, out, environ=None, proc=Path('/proc'), parent=None):
     """the monitor's side: each line the identity's server pushes for this session, printed as it comes. The server
     is the one whose socket is named for one of this process's parents (the client both run under). 1 once it is
-    gone or none listens, said on out"""
+    gone or none listens, said on out; for a once identity, 0 after its one delivery, with what to do next"""
     folder = runtime_folder(identity.server, environ)
     me, command = identity.title, listen_command(identity)
     try:
@@ -6232,9 +6306,14 @@ def listen_to(identity, out, environ=None, proc=Path('/proc'), parent=None):
         except OSError:
             conn.close()
             continue  # a stopped server's
+        printed = 0
         with conn, conn.makefile('r', encoding='utf-8') as lines:
             for line in lines:
                 print(line.rstrip('\n'), file=out, flush=True)
+                printed += 1
+        if identity.once and printed:  # its one delivery: the session answers and starts it again
+            print(f'{me}: once you have answered, start this listener again: {command}', file=out, flush=True)
+            return 0
         print(
             f'{me}: its server for this session stopped; once it is up again, start this monitor again: {command}',
             file=out,
@@ -6243,7 +6322,8 @@ def listen_to(identity, out, environ=None, proc=Path('/proc'), parent=None):
         return 1
     print(
         f'{me}: no {me} server listens for this session (none of {folder}/<pid>.sock for its parents '
-        f'{", ".join(map(str, pids))}): is {identity.server} one of its MCP servers, and connected?',
+        f'{", ".join(map(str, pids))}): is {identity.server} one of its MCP servers, and connected?'
+        + (" Or agy's sandbox hides the folder: run this with BypassSandbox." if identity.once else ''),
         file=out,
         flush=True,
     )
@@ -6322,7 +6402,12 @@ class Server:
             log(f'channel: a {kind} event to {heard} monitor' + ('s' if heard > 1 else ''))
             return
         kept = kind in NEWS
-        log(f'channel: a {kind} event, no monitor listens' + (': kept for the next tool result' if kept else ''))
+        later = [
+            what
+            for what, yes in (('the next monitor', self.relay and self.relay.once), ('the next tool result', kept))
+            if yes
+        ]
+        log(f'channel: a {kind} event, no monitor listens' + (f': kept for {" and ".join(later)}' if later else ''))
         if kept:
             with self.guard:
                 self.news.append(content)
@@ -6338,6 +6423,17 @@ class Server:
             news.insert(0, f'{dropped} older news were left out: {self.title} keeps the newest {MOST_NEWS}')
         for text in news:
             result['content'].append({'type': 'text', 'text': f'{self.title} news: {text}'})
+        if self.relay and self.relay.once:
+            with self.relay.guard:
+                waiting = bool(self.relay.peers)
+            if not waiting:  # agy shows its model no server's instructions, only the tools' names: each result says it
+                result['content'].append(
+                    {
+                        'type': 'text',
+                        'text': f'{self.title} news: no listener of yours waits, so Discord wakes no one: run '
+                        f'`{listen_command(self.identity)}` in the background (run_command, WaitMsBeforeAsync 500)',
+                    }
+                )
         return result
 
     def notified(self, method, params):
