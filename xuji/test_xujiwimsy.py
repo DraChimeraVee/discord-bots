@@ -271,8 +271,8 @@ class Clients(WithXuji):
         self.assertEqual(
             error['message'],
             'Invalid params: clientInfo.name is "grok-shell-aogowimsy", not "claude-code": AogoWimsy is Aogo\'s, for '
-            'Claude Code alone; another client runs XujiWimsy (xujiwimsy) and keeps aogowimsy off (Grok Build: grok '
-            'mcp disable aogowimsy)',
+            'Claude Code alone; another client runs XujiWimsy (xujiwimsy) or GenaWimsy (genawimsy) and keeps '
+            'aogowimsy off (Grok Build: grok mcp disable aogowimsy; agy: agy mcp remove aogowimsy)',
         )
         self.assertIn(f'initialize refused: {error["message"].removeprefix("Invalid params: ")}', self.logs)
         no_info = initialize(server, {'protocolVersion': '2025-11-25', 'capabilities': {}})['error']['message']

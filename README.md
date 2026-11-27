@@ -8,18 +8,20 @@
   * [Where the owner is, and an approver](#where-the-owner-is-and-an-approver)
   * [As a channel](#as-a-channel)
 * [XujiWimsy](#xujiwimsy)
+* [GenaWimsy](#genawimsy)
 * [Tests](#tests)
 * [The Discord applications](#the-discord-applications)
 
 DraVee's personal bots, kept private, each the MCP server a coding session starts, Python 3.12 with its standard
-library: AogoWimsy, Aogo (a Claude Code session) on Discord, and XujiWimsy, the same server with a bot of its own, for
-Xuji (a Grok Build session). The project's public bots, ReiWimsy and AccordWimsy, are in
+library: AogoWimsy, Aogo (a Claude Code session) on Discord, and XujiWimsy and GenaWimsy, the same server with a bot of
+its own each, for Xuji (a Grok Build session) and Gena (a session in Antigravity's `agy`). The project's public bots, ReiWimsy and AccordWimsy, are in
 [scarletnx/wimsy-core](https://github.com/scarletnx/wimsy-core).
 
 | Bot | What it does | What it reads | What it sends out |
 |---|---|---|---|
 | `aogo/aogowimsy.py` (AogoWimsy) | Aogo, the Claude Code session, on Discord as a bot user of its own, through twelve MCP tools: post (once its owner approves the draft, or at once where the rules he sets let it), take back a post queued or held while its owner is away, the same wait on a draft still waiting, read a channel, wait for a reply, save a message's attachments, put or take off one of a fixed few reactions, answer with one of those emojis alone (neither carries text, so both go at once), upload the server's custom emojis it answers with, list who its owner allowed, and ice someone who tried what its harness refuses. A slash command, `/aogo`: help for anyone, and its owner's trust, allow, weight and ice for people, tone for channels, where he is (mode) and an approver of its drafts. A pre-harness of rules checks what comes in and what goes out direct. A Claude Code channel too: while the session runs it stays on Discord's gateway and wakes the session with what is addressed to it, each event saying how much its author is trusted, how an answer may go and its channel's tone, and greets a stranger who calls it with a fixed line that pings its owner, within limits | the messages of the channels it lists and their threads, or of every one it sees, and its owner's DMs with it: the owner's, those he trusts or allowed (as much as their weight lets) and its own reach the session, and a stranger's only once its owner, or a reply of someone he trusts, lets it through; the others only counted, and a stranger's DM only by name; its owner's reactions to a draft or to a stranger's message; Claude Code's status line (the quota, the context, this session's agents) | to Discord, the drafts (to its owner's DMs), the posts approved, the direct posts, its reactions and quick replies, the four emojis it uploads, its greeting to a stranger who calls it, the pre-harness's and the ice's fixed lines, `/aogo` and its answers (seen by their asker alone), `/aogo people` (to its owner's DMs); to the session, the messages it may read and the ones addressed to it |
 | `xuji/xujiwimsy.py` (XujiWimsy) | Xuji, the Grok Build session, on Discord as a bot user of its own: AogoWimsy's code and its tools but `discord_cancel` (eleven), `/xuji` without mode and approver, with Xuji's bot, settings and drawn emojis, its reactions and quick replies the unicode emojis alone. It pushes what is addressed to Xuji, its owner's answers to its drafts and the gateway's news to the session's monitor, a line each, as Grok Build takes no push from an MCP server | as AogoWimsy | as AogoWimsy, but to the session's monitor (a local socket) in place of a claude/channel, no drawn emoji, and it greets no one and has no command |
+| `gena/genawimsy.py` (GenaWimsy) | Gena, the session in Antigravity's `agy`, on Discord as a bot user of its own: XujiWimsy's tools less `discord_emoji_upload` (ten: no drawings of Gena yet, so the unicode emojis alone), `/gena`, with Gena's bot and settings. `agy` wakes its session when a background command ends, so its monitor ends on what it gets and the session starts it again | as AogoWimsy | as XujiWimsy, its monitor getting one delivery each |
 
 No bot keeps a message or logs what was said, and none pings anyone but AogoWimsy's greeting and its ice lines, which
 ping its owner (an ice line for a secret or abuse, the server's admin role too).
@@ -412,9 +414,57 @@ it, and `grok mcp doctor` shows `handshake failed (JSON-RPC error: -32602: Inval
 In Grok Build 1.0.60, neither `[compat.claude] mcps = false` (it covers `~/.claude.json` alone) nor an
 `[mcp_servers.aogowimsy]` table holding only `enabled = false` keeps a `.mcp.json` server from starting.
 
+## GenaWimsy
+
+Gena, the session in Antigravity's `agy`, on Discord as a bot user of its own. `gena/genawimsy.py` runs
+`aogo/aogowimsy.py` with Gena's identity (`GENA` in `IDENTITIES`), as XujiWimsy does with Xuji's: its bot, its env
+file and keys (`GENAWIMSY_TOKEN`, `GENAWIMSY_OWNER`, `GENAWIMSY_USERS`, `GENAWIMSY_CHANNELS`, and `GENAWIMSY_DIRECT`,
+`GENAWIMSY_DIRECT_MINUTES` for its direct posts), its command `/gena`, its state in `<XDG_STATE_HOME or
+~/.local/state>/genawimsy/`, the pre-harness on what comes in and on its direct posts. Everything XujiWimsy says above
+holds but for these:
+
+- **What wakes her.** `agy` takes no push from an MCP server (its `mcp_servers.md`: tools are discovered and called;
+  nothing reaches a running conversation), and what wakes its session is a subagent, a timer, or a background
+  command's end. Its own system prompt (agy, 2026-11-27): "Commands that do not finish within the specified wait time
+  continue running in the background as tasks; the system will notify you when they finish". A line a command prints
+  while it runs wakes no one, so XujiWimsy's persistent monitor would never wake her. GenaWimsy's monitor ends on
+  what it gets (`Identity.once`): the server gives each monitor that connects one delivery and closes it, either the
+  events that came while none listened (kept for it, the newest 20, the older ones counted in a first `notice:`
+  line) or the next one; `gena/genawimsy.py --listen` prints them, then
+  `GenaWimsy: once you have answered, start this listener again: <its command>`, and ends with 0. The task's end wakes
+  her; she answers and starts it again. A server that stops before anything came is said, and it ends with 1.
+- **Its instructions** ask the session to run that command in the background at its start (`run_command` with
+  `WaitMsBeforeAsync` 500) and again after each answer. agy's own bound on a server's instructions is not measured,
+  so they are held to Grok Build's 2048 bytes; past it, stderr and the first tool result say so, naming agy.
+- **The news** the gateway brings while no monitor listens wait for the next monitor and also come with the next
+  tool result, as XujiWimsy's do.
+- **Its emojis** are the unicode ones alone (no drawings of Gena yet: no `discord_emoji_upload`); the owner's
+  `:wimsygena:` lets a stranger's message through once a server has an emoji of that name.
+- **Its interval** is `GENAWIMSY_DIRECT_MINUTES`, fixed: `agy` reports its quota and context only to a status line
+  script (its docs, `statusLine`: the JSON on stdin holds `quota` and `context_window`), which nothing here reads yet.
+- AogoWimsy refuses `agy`, naming XujiWimsy and GenaWimsy; GenaWimsy refuses Claude Code, naming AogoWimsy.
+
+Setting it up, after its application (below):
+
+1. Its owner shares a server with it and lets that server's members send them DMs, as for AogoWimsy.
+2. The env file, then a look at it (the line `up`, or what is wrong):
+
+       install -d -m 700 ~/.config/genawimsy
+       install -m 600 gena/genawimsy.env.example ~/.config/genawimsy/genawimsy.env   # then fill it in
+       python3 gena/genawimsy.py </dev/null
+
+3. `agy`, then `agy mcp list` (flags go before the name, and `--` before a command whose arguments start with `-`):
+
+       agy mcp add genawimsy -- python3 /path/to/discord-bots/gena/genawimsy.py
+
+4. A session, in `agy` (a new one, or its `/mcp`): its server's instructions have it run the listener in the
+   background; `/tasks` lists it while it waits. Without it, ask the session to run the command its GenaWimsy
+   instructions name. If `agy`'s sandbox keeps the listener from its socket, the listener says it finds no server:
+   run it with `BypassSandbox`.
+
 ## Tests
 
-    python3 aogo/test_aogowimsy.py && python3 xuji/test_xujiwimsy.py
+    python3 aogo/test_aogowimsy.py && python3 xuji/test_xujiwimsy.py && python3 gena/test_genawimsy.py
 
 No network and no Discord: AogoWimsy's env file, its MCP answers (and the program itself on stdin and stdout), its tools
 against a fake Discord on 127.0.0.1 (drafts approved, refused, still waiting, another person's reaction, the channels
@@ -450,14 +500,21 @@ alone; its instructions within what Grok shows, and too many ids said), its moni
 line each within what Grok shows, news only when none listens, the socket private, a stale one taken over, a live one's
 server named, those of clients gone taken away) and `--listen` (its own session's server found among its parents, lines
 as they come, a last line once it stops, none found said; the program itself as a monitor runs it), the client each
-Wimsy serves, the news a tool result carries, a post as it reaches Discord, and the program itself on stdin and stdout.
+Wimsy serves, the news a tool result carries, a post as it reaches Discord, and the program itself on stdin and stdout;
+GenaWimsy's env file and keys (the other two bots' refused both ways, and its example XujiWimsy's in its names), its
+server, instructions (the listener as a background command, within 2048 bytes, too many ids said naming agy) and tools
+in its own names (the unicode emojis alone, no upload), the clients (Claude Code refused naming AogoWimsy, and
+AogoWimsy refusing agy naming both bots), its direct posts at a fixed interval, `:wimsygena:` letting a message through,
+`/gena`, its monitors (one delivery each and closed, what came while none listened kept for the next and for the next
+tool result, past 20 the oldest counted, a monitor gone before its delivery leaving them) and `--listen` (its one
+delivery and what to do, ending with 0; a server stopped before anything came, 1; the program itself as agy runs it).
 
 ## The Discord applications
 
 One application each, in the Developer Portal:
 
 1. Bot: reset the token, put it in the env file; turn on **Message Content Intent** (without it, the messages
-   AogoWimsy and XujiWimsy read come with no text, and their gateway closes with 4014). AogoWimsy and XujiWimsy: the
+   AogoWimsy, XujiWimsy and GenaWimsy read come with no text, and their gateway closes with 4014). Each of them: the
    name and avatar are set there too, and **Public Bot** is off, so only the owner adds it to a server. Their gateway
    asks for the intents GUILDS, GUILD_MESSAGES, GUILD_MESSAGE_REACTIONS, DIRECT_MESSAGES, DIRECT_MESSAGE_REACTIONS (the
    owner's answer to a draft, in his DMs) and MESSAGE_CONTENT (46593); only the last is privileged. AogoWimsy:
@@ -465,17 +522,18 @@ One application each, in the Developer Portal:
    not over the gateway.
 2. About me: what it does and that it keeps nothing (AogoWimsy: that it is Aogo, a Claude Code session, and posts
    only what its owner approved; XujiWimsy: that it is Xuji, a Grok Build session, and the same: its posts carry no
-   signature, so the profile says who writes).
-3. Invite (OAuth2, scopes `bot` and, for AogoWimsy's `/aogo`, `applications.commands`), with only what it needs:
-   - AogoWimsy and XujiWimsy: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add
-     Reactions (`discord_react`), Attach Files (`discord_post`'s images and sounds; the drafts, their card and their reactions
+   signature, so the profile says who writes; GenaWimsy: that it is Gena, a session in Antigravity, and the same).
+3. Invite (OAuth2, scopes `bot` and, for its slash command (`/aogo`, `/xuji`, `/gena`), `applications.commands`),
+   with only what it needs:
+   - Each of them: View Channels, Send Messages, Send Messages in Threads, Read Message History, Add Reactions
+     (`discord_react`), Attach Files (`discord_post`'s images and sounds; the drafts, their card and their reactions
      are in DMs, which need none): `permissions=274878008384`. AogoWimsy: a custom emoji of another server than the
      message's also needs Use External Emojis, and `discord_emoji_upload` Create Expressions: `permissions=9070971030592`
      with it.
 
    `https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=<number>`
 
-   (XujiWimsy: `scope=bot` alone.) The slash command needs no permission of the bot's: the scope is what lets it
-   register `/aogo` in the server, and a member needs Use Application Commands, which `@everyone` has by default.
+   The slash command needs no permission of the bot's: the scope is what lets it register `/aogo` (`/xuji`, `/gena`)
+   in the server, and a member needs Use Application Commands, which `@everyone` has by default.
 
-`AOGOWIMSY_OWNER` and `XUJIWIMSY_OWNER` are the owner's Discord user id (Developer Mode, right click, Copy User ID).
+`AOGOWIMSY_OWNER`, `XUJIWIMSY_OWNER` and `GENAWIMSY_OWNER` are the owner's Discord user id (Developer Mode, right click, Copy User ID).
